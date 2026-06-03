@@ -59,6 +59,7 @@ def initialize_database() -> None:
             uploaded_at TEXT NOT NULL,
             extracted_text TEXT,
             conversation_id INTEGER,
+            extraction_method TEXT,
             FOREIGN KEY(conversation_id) REFERENCES conversations(id)
         )
         """
@@ -72,6 +73,13 @@ def initialize_database() -> None:
 
     try:
         cursor.execute("ALTER TABLE uploaded_files ADD COLUMN conversation_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute(
+            "ALTER TABLE uploaded_files ADD COLUMN extraction_method TEXT"
+        )
     except sqlite3.OperationalError:
         pass
 
@@ -230,6 +238,7 @@ def save_uploaded_file(
     size: int,
     extracted_text: str = "",
     conversation_id: int | None = None,
+    extraction_method: str | None = None,
 ) -> dict:
 
     conn = get_db_connection()
@@ -244,9 +253,10 @@ def save_uploaded_file(
             size,
             uploaded_at,
             extracted_text,
-            conversation_id
+            conversation_id,
+            extraction_method
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             original_name,
@@ -255,6 +265,7 @@ def save_uploaded_file(
             uploaded_at,
             extracted_text,
             conversation_id,
+            extraction_method,
         ),
     )
 

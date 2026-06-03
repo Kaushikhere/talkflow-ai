@@ -58,10 +58,10 @@ function renderWelcomeState() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
                 </svg>
-                PDF-aware assistant
+                PDF and image assistant
             </div>
             <h2>Ask anything about your documents</h2>
-            <p>Upload a PDF, then chat with full context from the extracted text.</p>
+            <p>Upload a PDF or image, then chat with full context from extracted or vision-analyzed content.</p>
             <div id="suggestion-list" class="feature-grid">
                 <button class="feature-card" type="button" data-prompt="Summarize this document in simple terms.">
                     <div class="feature-icon">
@@ -563,8 +563,9 @@ async function uploadSelectedFile() {
             body: formData
         });
         if (!response.ok) {
-            const bodyText = await response.text().catch(() => "");
-            throw new Error(bodyText || `Server returned ${response.status}`);
+            const errorData = await response.json().catch(() => ({}));
+            const detail = errorData.detail || `Server returned ${response.status}`;
+            throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
         }
         const data = await response.json();
 
@@ -575,12 +576,24 @@ async function uploadSelectedFile() {
         const pageInfo = Number.isInteger(data?.metadata?.pdf_pages)
             ? `, ${data.metadata.pdf_pages} pages`
             : "";
+        const extraction = data.extraction_method || data?.metadata?.extraction;
 
         if (data.has_text) {
-            uploadStatus.textContent = `File ready! Ask any question about "${data.name}"`;
+            let statusMsg = `Ready: ${data.name} (${formatBytes(data.size)}${pageInfo})`;
+            if (extraction === "vision") {
+                statusMsg += " — analyzed with AI vision";
+            } else if (extraction === "ocr") {
+                statusMsg += " — text extracted (OCR)";
+            } else if (extraction === "pymupdf" || extraction === "plain") {
+                statusMsg += " — text extracted";
+            }
+            uploadStatus.textContent = statusMsg;
             uploadStatus.className = "composer-upload-status success";
+        } else if (data?.metadata?.error === "image_too_large_for_vision") {
+            uploadStatus.textContent = `Uploaded but too large for vision. Try a smaller image or install Tesseract for OCR.`;
+            uploadStatus.className = "composer-upload-status error";
         } else {
-            uploadStatus.textContent = `Uploaded: ${data.name} (${formatBytes(data.size)}${pageInfo}) - No text found`;
+            uploadStatus.textContent = `Uploaded: ${data.name} (${formatBytes(data.size)}${pageInfo}) — no content extracted`;
             uploadStatus.className = "composer-upload-status";
         }
         fileInput.value = "";

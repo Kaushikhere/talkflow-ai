@@ -1,6 +1,3 @@
-import os
-
-from dotenv import load_dotenv
 from fastapi import HTTPException
 
 from app import state
@@ -12,36 +9,7 @@ from app.database import (
     save_chat_message,
     update_file_conversation,
 )
-
-load_dotenv()
-
-client = None
-
-
-def get_groq_client():
-    global client
-
-    if client is not None:
-        return client
-
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Missing GROQ_API_KEY in environment variables.",
-        )
-
-    try:
-        from groq import Groq
-    except ImportError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="Missing groq package. Install project dependencies first.",
-        ) from exc
-
-    client = Groq(api_key=api_key)
-    return client
-
+from app.services.groq_client import get_groq_client
 
 MAX_CONTEXT_LENGTH = 30000
 
@@ -67,7 +35,7 @@ def build_file_context(file_ids: list[int] | None, conversation_id: int | None) 
     if not files_data:
         return ""
 
-    context_parts = ["The user has uploaded the following documents:\n"]
+    context_parts = ["The user has uploaded the following documents and images:\n"]
     total_length = len(context_parts[0])
 
     for file_data in files_data:
@@ -127,8 +95,8 @@ def generate_reply(
     if file_context:
         system_content = (
             "You are a helpful assistant. "
-            "The user has uploaded documents that you can reference to answer their questions. "
-            "When answering questions about the documents, cite specific information from them.\n\n"
+            "The user has uploaded documents and images that you can reference to answer their questions. "
+            "When answering, cite specific information from the uploaded content.\n\n"
             f"{file_context}"
         )
 
