@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 *.db
 uploads/
+*.log
+_upload_test.txt

@@ -1,5 +1,8 @@
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from app.config import BASE_DIR
 from app.database import initialize_database, initialize_storage
 from app.routers.admin import router as admin_router
 from app.routers.chat import router as chat_router
@@ -24,8 +27,17 @@ def create_app() -> FastAPI:
     def home():
         return {"message": "Server is running"}
 
+    @app.get("/app")
+    def frontend_app():
+        return FileResponse(BASE_DIR / "frontend" / "index.html")
+
     app.include_router(chat_router)
     app.include_router(admin_router)
     app.include_router(uploads_router)
+    app.mount(
+        "/frontend",
+        StaticFiles(directory=BASE_DIR / "frontend"),
+        name="frontend",
+    )
 
     return app

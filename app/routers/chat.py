@@ -1,6 +1,10 @@
 from fastapi import APIRouter
 
-from app.database import get_db_connection
+from app.database import (
+    clear_all_conversations,
+    get_all_conversations,
+    get_conversation_messages,
+)
 from app.models import ChatRequest
 from app.services.chat_service import generate_reply
 
@@ -9,23 +13,46 @@ router = APIRouter()
 
 @router.post("/chat")
 def chat(request: ChatRequest):
-    return {"reply": generate_reply(request.message)}
+
+    result = generate_reply(
+        request.message,
+        request.conversation_id,
+        request.file_ids,
+    )
+
+    return result
 
 
-@router.get("/history")
-def get_history():
-    conn = get_db_connection()
-    rows = conn.execute(
-        "SELECT id, role, content, created_at FROM chat_history ORDER BY id ASC"
-    ).fetchall()
-    conn.close()
-    return {"messages": [dict(row) for row in rows]}
+@router.get("/conversations")
+def conversations():
+
+    rows = get_all_conversations()
+
+    return {
+        "conversations": [
+            dict(row)
+            for row in rows
+        ]
+    }
 
 
-@router.delete("/history")
-def clear_history():
-    conn = get_db_connection()
-    conn.execute("DELETE FROM chat_history")
-    conn.commit()
-    conn.close()
-    return {"ok": True}
+@router.delete("/conversations")
+def clear_conversations():
+    return clear_all_conversations()
+
+
+@router.get("/conversations/{conversation_id}")
+def conversation_messages(
+    conversation_id: int,
+):
+
+    rows = get_conversation_messages(
+        conversation_id
+    )
+
+    return {
+        "messages": [
+            dict(row)
+            for row in rows
+        ]
+    }
