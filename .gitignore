@@ -7,3 +7,5 @@ __pycache__/
 uploads/
 *.log
 _upload_test.txt
+data/kb/
+data/chroma/

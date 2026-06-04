@@ -102,6 +102,47 @@ def extract_pdf_with_ocr(file_path: Path) -> str:
         return ""
 
 
+def extract_pdf_pages(file_path: Path) -> list[str]:
+    """Extract text per PDF page (PyMuPDF first, OCR fallback if empty)."""
+    if file_path.suffix.lower() != ".pdf":
+        return []
+
+    pages: list[str] = []
+    try:
+        with open_pdf(file_path) as document:
+            for page in document:
+                page_text = page.get_text()
+                if page_text and page_text.strip():
+                    pages.append(page_text.strip())
+    except Exception as exc:
+        logger.error("Per-page PDF extraction failed for %s: %s", file_path.name, exc)
+        return []
+
+    if pages:
+        return pages
+
+    if not _configure_tesseract():
+        return []
+
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+    except ImportError as exc:
+        logger.warning("PDF OCR dependencies missing (pdf2image/pytesseract): %s", exc)
+        return []
+
+    try:
+        images = convert_from_path(str(file_path))
+        for img in images:
+            page_text = pytesseract.image_to_string(img)
+            if page_text and page_text.strip():
+                pages.append(page_text.strip())
+    except Exception as exc:
+        logger.error("Per-page PDF OCR failed for %s: %s", file_path.name, exc)
+
+    return pages
+
+
 def extract_pdf_metadata(file_path: Path) -> dict:
     if file_path.suffix.lower() != ".pdf":
         return {}
