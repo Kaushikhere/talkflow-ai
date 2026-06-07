@@ -1,8 +1,9 @@
 import re
 
-from app.config import KB_TOP_K
-from app.database import list_indexed_kb_documents
+from app.config import KB_RERANK_ENABLED, KB_RERANK_POOL, KB_RETRIEVE_POOL, KB_TOP_K
+from app.database import get_kb_document_by_id, list_indexed_kb_documents
 from app.services.kb_embeddings import query_chunks, query_chunks_for_document
+from app.services.kb_rerank import rerank_hits
 
 MAX_KB_CONTEXT_CHARS = 24_000
 
@@ -209,14 +210,14 @@ def retrieve_kb_hits(query: str, *, top_k: int | None = None) -> list[dict]:
     if title_docs:
         primary_ratio = title_docs[0].get("title_match_ratio", 0)
         if primary_ratio >= _FOCUS_TITLE_RATIO:
-            per_doc = max(8, k)
+            per_doc = max(20, k)
             focused = _hits_from_documents(
                 title_docs[:2],
                 query,
                 total_k=k,
                 per_doc_k=per_doc,
             )
-            if len(focused) >= min(4, k):
+            if len(focused) >= min(4, min(k, KB_TOP_K)):
                 return focused
 
         priority_slots = min(k, max(6, k - 2))
@@ -255,34 +256,240 @@ def retrieve_kb_hits(query: str, *, top_k: int | None = None) -> list[dict]:
     return _dedupe_hits(vector_hits)[:k]
 
 
-def build_kb_context(query: str, *, top_k: int | None = None) -> tuple[str, list[dict]]:
-    k = top_k or KB_TOP_K
-    hits = retrieve_kb_hits(query, top_k=k)
-    if not hits:
-        return "", []
+def _retrieval_pool_size(final_k: int) -> int:
+    if KB_RERANK_ENABLED:
+        return max(final_k, KB_RETRIEVE_POOL)
+    return final_k
 
-    parts = [
-        "Care Health Insurance knowledge base excerpts for this question.\n"
-        "Instructions:\n"
-        "- Answer fully using the excerpts below (benefits, coverage, waiting periods, "
-        "eligibility, limits, optional covers, etc. when present).\n"
-        "- Organize the reply with clear headings or bullet points.\n"
-        "- Cite document titles and page numbers for major points.\n"
-        "- Only state that specific information is missing if it is not in any excerpt; "
-        "do not add generic disclaimers that excerpts are incomplete or that more "
-        "research is needed when the excerpts already support an answer.\n"
-        "- Do not invent policy details not shown in the excerpts.\n",
-    ]
+
+def _rank_candidates(query: str, candidates: list[dict]) -> list[dict]:
+    """Rerank only the top KB_RERANK_POOL candidates (cross-encoder is the main latency cost)."""
+    if not KB_RERANK_ENABLED or not candidates:
+        return candidates
+    cap = min(len(candidates), KB_RERANK_POOL)
+    if cap <= 0:
+        return candidates
+    head = candidates[:cap]
+    tail = candidates[cap:]
+    ranked_head = rerank_hits(query, head, top_k=len(head))
+    return ranked_head + tail
+
+
+def _title_from_chunk_text(text: str) -> str | None:
+    if not text.startswith("Document: "):
+        return None
+    first_line = text.split("\n", 1)[0]
+    title = first_line[len("Document: ") :].strip()
+    return title or None
+
+
+def _strip_document_prefix(text: str) -> str:
+    """Remove ingested filename/title prefix so the LLM does not echo raw catalog names."""
+    if not text.startswith("Document: "):
+        return text
+    parts = text.split("\n\n", 1)
+    if len(parts) == 2 and parts[1].strip():
+        return parts[1].strip()
+    return text
+
+
+def _resolve_hit_title(hit: dict, title_cache: dict[int, str]) -> str:
+    meta = hit.get("metadata") or {}
+    title = (meta.get("title") or "").strip()
+    if title:
+        return title
+
+    doc_id = meta.get("document_id")
+    if doc_id is not None:
+        try:
+            doc_id_int = int(doc_id)
+        except (TypeError, ValueError):
+            doc_id_int = None
+        if doc_id_int is not None:
+            if doc_id_int in title_cache:
+                return title_cache[doc_id_int]
+            doc = get_kb_document_by_id(doc_id_int)
+            if doc and (doc.get("title") or "").strip():
+                resolved = doc["title"].strip()
+                title_cache[doc_id_int] = resolved
+                return resolved
+
+    parsed = _title_from_chunk_text(hit.get("text") or "")
+    if parsed:
+        return parsed
+    return "Document"
+
+
+_HASH_SUFFIX_RE = re.compile(r"\s+[0-9a-f]{6,}\s*$", re.IGNORECASE)
+_NOISE_PHRASES = (
+    " prospectus cum sales literature",
+    " policy terms conditions",
+    " policy terms and conditions",
+    " brochure",
+    " prospectus",
+    " health insurance product",
+    " travel insurance product",
+    " personal accident product",
+    " insurance product",
+)
+
+
+def _clean_source_title(raw: str) -> str:
+    """Return a customer-facing product name by stripping internal catalog noise."""
+    title = raw.strip()
+    # remove trailing hex hashes like "3d0d593145"
+    title = _HASH_SUFFIX_RE.sub("", title).strip()
+    # remove parenthetical type labels: "(health insurance product)"
+    title = re.sub(r"\s*\([^)]*product[^)]*\)", "", title, flags=re.IGNORECASE).strip()
+    # remove known noise suffixes (longest first to avoid partial matches)
+    lower = title.lower()
+    for phrase in _NOISE_PHRASES:
+        if lower.endswith(phrase):
+            title = title[: len(title) - len(phrase)].strip()
+            lower = title.lower()
+    # strip leading "add on " prefix
+    if lower.startswith("add on "):
+        title = title[7:].strip()
+        lower = title.lower()
+    # title-case the result
+    return title.title() if title else raw.strip()
+
+
+def _build_display_sources(hits: list[dict]) -> list[dict]:
+    """Group retrieved chunks by cleaned product title (one row per document/product).
+
+    The retrieval pool can return many chunks from the same brochure on different
+    pages — the UI shows one entry per product with all referenced pages combined.
+    """
+    title_cache: dict[int, str] = {}
+    seen_chunk: set[tuple[int | None, int | None]] = set()
+    grouped: dict[str, dict] = {}
+    order: list[str] = []
+
+    for hit in hits:
+        meta = hit.get("metadata") or {}
+        doc_id = meta.get("document_id")
+        page_number = meta.get("page_number")
+        try:
+            doc_key = int(doc_id) if doc_id is not None else None
+        except (TypeError, ValueError):
+            doc_key = None
+
+        chunk_key = (doc_key, page_number)
+        if chunk_key in seen_chunk:
+            continue
+        seen_chunk.add(chunk_key)
+
+        title = _clean_source_title(_resolve_hit_title(hit, title_cache))
+        group_key = title.lower()
+        if group_key not in grouped:
+            grouped[group_key] = {
+                "title": title,
+                "pages": set(),
+                "document_id": doc_key,
+                "distance": hit.get("distance"),
+                "snippet": (hit.get("text") or "")[:200],
+            }
+            if "rerank_score" in hit:
+                grouped[group_key]["rerank_score"] = hit["rerank_score"]
+            order.append(group_key)
+
+        if page_number is not None:
+            grouped[group_key]["pages"].add(page_number)
+
     sources: list[dict] = []
-    total = len(parts[0])
+    for index, group_key in enumerate(order, start=1):
+        entry = grouped[group_key]
+        pages = sorted(entry["pages"])
+        doc_key = entry["document_id"]
+        summary: dict = {
+            "index": index,
+            "title": entry["title"],
+            "pages": pages,
+            "page_number": pages[0] if len(pages) == 1 else None,
+            "document_id": doc_key,
+            "distance": entry.get("distance"),
+            "snippet": entry.get("snippet"),
+        }
+        if doc_key is not None:
+            first_page = pages[0] if pages else None
+            page_q = f"?page={first_page}" if first_page is not None else ""
+            summary["view_url"] = f"/kb/documents/{doc_key}/file{page_q}"
+        if "rerank_score" in entry:
+            summary["rerank_score"] = entry["rerank_score"]
+        sources.append(summary)
+
+    return sources
+
+
+_CATALOG_QUERY_RE = re.compile(
+    r"\b("
+    r"what\s+plans?|which\s+plans?|list\s+(all\s+)?(plans?|products?)|"
+    r"how\s+many\s+(plans?|products?)|all\s+(plans?|products?)|"
+    r"plans?\s+do\s+you\s+(have|offer)|products?\s+do\s+you\s+(have|offer)|"
+    r"what\s+(plans?|products?)\s+(are\s+)?available"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_catalog_query(query: str) -> bool:
+    return bool(_CATALOG_QUERY_RE.search(query))
+
+
+def _all_catalog_product_names() -> list[str]:
+    """All indexed KB product names (cleaned), for catalog-style questions."""
+    _ensure_doc_cache()
+    assert _doc_cache is not None
+    seen: set[str] = set()
+    names: list[str] = []
+    for doc in _doc_cache:
+        clean = _clean_source_title(doc.get("title") or "")
+        lower = clean.lower()
+        if lower not in seen and clean and lower != "document":
+            seen.add(lower)
+            names.append(clean)
+    return names
+
+
+def _extract_product_names(hits: list[dict]) -> list[str]:
+    """Unique cleaned product names from retrieved hits, in retrieval order."""
+    title_cache: dict[int, str] = {}
+    seen: set[str] = set()
+    names: list[str] = []
+    for hit in hits:
+        raw = _resolve_hit_title(hit, title_cache)
+        clean = _clean_source_title(raw)
+        lower = clean.lower()
+        if lower not in seen and clean and clean.lower() != "document":
+            seen.add(lower)
+            names.append(clean)
+    return names
+
+
+def build_kb_context(query: str, *, top_k: int | None = None) -> tuple[str, list[dict], list[str]]:
+    k = top_k or KB_TOP_K
+    pool = _retrieval_pool_size(k)
+    candidates = retrieve_kb_hits(query, top_k=pool)
+    ranked_pool = _rank_candidates(query, candidates)
+    hits = ranked_pool[:k]
+    if not hits:
+        return "", [], []
+
+    product_names = _extract_product_names(ranked_pool)
+    if _is_catalog_query(query):
+        seen = {n.lower() for n in product_names}
+        for name in _all_catalog_product_names():
+            if name.lower() not in seen:
+                product_names.append(name)
+                seen.add(name.lower())
+
+    parts: list[str] = []
+    total = 0
 
     for index, hit in enumerate(hits, start=1):
-        meta = hit.get("metadata") or {}
-        title = meta.get("title") or "Document"
-        page = meta.get("page_number")
-        page_label = f", page {page}" if page is not None else ""
-        header = f"\n--- KB source {index}: {title}{page_label} ---\n"
-        body = (hit.get("text") or "").strip()
+        header = f"\n--- Excerpt {index} ---\n"
+        body = _strip_document_prefix((hit.get("text") or "").strip())
         block = header + body + "\n"
 
         if total + len(block) > MAX_KB_CONTEXT_CHARS:
@@ -290,25 +497,12 @@ def build_kb_context(query: str, *, top_k: int | None = None) -> tuple[str, list
             if remaining > 200:
                 block = header + body[:remaining] + "\n[Excerpt truncated...]\n"
                 parts.append(block)
-                sources.append(_source_summary(index, hit))
             parts.append("\n[Additional KB excerpts omitted due to length...]\n")
             break
 
         parts.append(block)
         total += len(block)
-        sources.append(_source_summary(index, hit))
 
-    parts.append("\n--- End of knowledge base excerpts ---\n")
-    return "".join(parts), sources
-
-
-def _source_summary(index: int, hit: dict) -> dict:
-    meta = hit.get("metadata") or {}
-    return {
-        "index": index,
-        "title": meta.get("title"),
-        "page_number": meta.get("page_number"),
-        "document_id": meta.get("document_id"),
-        "distance": hit.get("distance"),
-        "snippet": (hit.get("text") or "")[:200],
-    }
+    parts.append("\n--- End of excerpts ---\n")
+    sources = _build_display_sources(ranked_pool)
+    return "".join(parts), sources, product_names

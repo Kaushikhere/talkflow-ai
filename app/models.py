@@ -26,5 +26,13 @@ class KbIngestRequest(BaseModel):
     )
 
 
+class PolicyRecommendRequest(BaseModel):
+    age: int = Field(ge=1, le=120)
+    budget_monthly: int | None = Field(default=None, ge=0)
+    pre_existing: bool = False
+    family_size: int = Field(default=1, ge=1, le=20)
+    priorities: list[str] = Field(default_factory=list)
+
+
 class MaintenanceRequest(BaseModel):
     enabled: bool

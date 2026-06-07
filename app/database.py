@@ -502,6 +502,23 @@ def list_indexed_kb_documents() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_kb_document_by_id(document_id: int) -> dict | None:
+    conn = get_db_connection()
+    row = conn.execute(
+        """
+        SELECT id, source_url, title, content_hash, raw_path, status, chunk_count,
+               created_at, updated_at
+        FROM kb_documents
+        WHERE id = ?
+        """,
+        (document_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
 def get_kb_document_by_source_url(source_url: str) -> dict | None:
     conn = get_db_connection()
     row = conn.execute(

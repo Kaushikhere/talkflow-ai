@@ -33,11 +33,15 @@ def create_app() -> FastAPI:
         if not KB_ENABLED:
             return
         try:
+            from app.config import KB_RERANK_ENABLED
             from app.services.kb_embeddings import warmup_kb_embeddings
+            from app.services.kb_rerank import warmup_kb_reranker
             from app.services.kb_retrieval import refresh_kb_document_cache
 
             warmup_kb_embeddings()
             refresh_kb_document_cache()
+            if KB_RERANK_ENABLED:
+                warmup_kb_reranker()
         except Exception as exc:
             logger.error(
                 "KB warmup failed; chat will work but KB retrieval may be unavailable: %s",

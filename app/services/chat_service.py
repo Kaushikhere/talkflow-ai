@@ -15,12 +15,88 @@ from app.database import (
     save_chat_message,
     update_file_conversation,
 )
-from app.config import KB_ENABLED, MAX_CHAT_HISTORY
+from app.config import (
+    FAITHFULNESS_ENABLED,
+    GROQ_CHAT_MODEL,
+    GROQ_MAX_TOKENS,
+    KB_ENABLED,
+    MAX_CHAT_HISTORY,
+)
+from app.services.faithfulness import check_faithfulness
 from app.services.groq_client import get_groq_client
 from app.services.kb_retrieval import build_kb_context
 
 MAX_CONTEXT_LENGTH = 30000
-GROQ_MODEL = "llama-3.1-8b-instant"
+
+_CARE_AGENT_BASE = """You are Aria, a senior insurance advisor at Care Health Insurance. You explain coverage clearly and warmly — like a trusted advisor, not a brochure dump.
+
+## Answer depth (most important)
+- Use ALL relevant information from <context>. Never give a partial or one-line answer when the context supports more.
+- For questions about a specific plan, benefit, waiting period, coverage, claim process, or eligibility: give a FULL answer.
+  Include every applicable detail from the context, organized into sections such as:
+  Overview, Key benefits, Coverage and limits, Waiting periods, Optional add-ons, Eligibility, Exclusions — only where the context provides them.
+- Do not summarize away important numbers, limits, periods, or feature names that appear in the context.
+- Do not say "contact us for more details" or "information may vary" when the context already contains the answer.
+- Only stay brief (~150–250 words) for broad catalog questions like "what plans do you have" or "list all products".
+
+## Formatting
+- Plain text only. No asterisks, markdown, hashtags, or bold syntax.
+- Use short section titles on their own line, then hyphen bullets (-) for lists.
+- Group many plans by category; one line per plan in catalog answers only.
+- For Explore travel variants in catalog mode: one intro, then region names — no repeated paragraphs.
+- Leave a blank line between sections.
+
+## How you communicate
+- Lead with a clear opening sentence, then deliver the full substance.
+- Never use filler ("Great question!", "I'd be happy to help", "Each plan has unique features").
+- Match the customer's energy: reassuring, analytical, or brief as needed.
+
+## Hard rules
+1. Use real product names from [PRODUCTS IN CONTEXT] and from <context> excerpts — never "Plan 1", "Plan 2", or placeholders.
+2. Never mention documents, brochures, page numbers, or excerpts.
+3. Do not invent coverage details absent from the context.
+4. End with one short follow-up question."""
+
+_KB_DEPTH_INSTRUCTION = """[KNOWLEDGE BASE ACTIVE]
+The <context> block contains retrieved excerpts for this question. Your job is to synthesize them into one complete, customer-ready answer.
+- Read every excerpt before writing.
+- If multiple excerpts mention the same product, merge them — do not ignore later excerpts.
+- Prefer completeness over brevity unless the user only asked for a high-level list."""
+
+_KB_EMPTY_INSTRUCTION = """[KNOWLEDGE BASE ACTIVE — NO MATCHING EXCERPTS]
+No relevant product excerpts were retrieved for this question.
+- Do not invent Care policy details.
+- Tell the user you could not find matching information in the product library for their question.
+- Suggest they name a specific plan (e.g. Care Supreme, Explore) or rephrase the question.
+- End with one clarifying follow-up question."""
+
+
+def _build_care_system_message(
+    *,
+    kb_context: str = "",
+    file_context: str = "",
+    product_names: list[str] | None = None,
+) -> str:
+    sections = [_CARE_AGENT_BASE]
+
+    if kb_context.strip():
+        sections.append(_KB_DEPTH_INSTRUCTION)
+
+    if product_names:
+        names_line = ", ".join(product_names)
+        sections.append(f"[PRODUCTS IN CONTEXT: {names_line}]\nUse these exact names in your reply.")
+
+    if kb_context.strip():
+        sections.append(f"<context>\n{kb_context.strip()}\n</context>")
+
+    if file_context.strip():
+        sections.append(
+            "<user_uploads>\n"
+            "The user has also shared the following files:\n"
+            f"{file_context.strip()}\n"
+            "</user_uploads>"
+        )
+    return "\n\n".join(sections)
 
 
 def build_file_context(file_ids: list[int] | None, conversation_id: int | None) -> str:
@@ -79,7 +155,7 @@ def _prepare_chat(
     file_ids: list[int] | None,
     *,
     use_knowledge_base: bool = True,
-) -> tuple[int, list[dict], str, list[dict], bool]:
+) -> tuple[int, list[dict], str, list[dict], bool, str]:
     if state.maintenance_mode:
         raise HTTPException(
             status_code=503,
@@ -101,38 +177,33 @@ def _prepare_chat(
     file_context = build_file_context(file_ids, conversation_id)
     kb_context = ""
     kb_sources: list[dict] = []
+    kb_product_names: list[str] = []
     kb_used = KB_ENABLED and use_knowledge_base
 
     if kb_used:
         try:
-            kb_context, kb_sources = build_kb_context(cleaned)
+            kb_context, kb_sources, kb_product_names = build_kb_context(cleaned)
         except Exception as exc:
             logger.error("KB retrieval failed, continuing without KB context: %s", exc)
 
     if kb_context:
-        system_content = (
-            "You are a Care Health Insurance product assistant. "
-            "Use only the knowledge base excerpts below to answer.\n"
-            "Give a clear, structured answer (overview, key benefits/features, "
-            "coverage highlights, optional add-ons, eligibility or limits when shown). "
-            "Use bullet points or short sections. Cite document titles and page numbers.\n"
-            "Do not end with vague disclaimers that excerpts are incomplete or that "
-            "more detailed information is required unless the user asked for something "
-            "specific that is truly absent from the excerpts.\n"
-            "If a detail is not in the excerpts, say it is not stated in the indexed "
-            "documents for that product.\n"
-            f"{kb_context}"
+        system_content = _build_care_system_message(
+            kb_context=kb_context,
+            file_context=file_context,
+            product_names=kb_product_names,
         )
-        if file_context:
-            system_content += (
-                "\nThe user has also uploaded the following files for this conversation:\n"
-                f"{file_context}"
+    elif kb_used:
+        empty_sections = [_CARE_AGENT_BASE, _KB_EMPTY_INSTRUCTION]
+        if file_context.strip():
+            empty_sections.append(
+                "<user_uploads>\n"
+                "The user has also shared the following files:\n"
+                f"{file_context.strip()}\n"
+                "</user_uploads>"
             )
+        system_content = "\n\n".join(empty_sections)
     elif file_context:
-        system_content = (
-            "You are a helpful assistant. Answer using only the user's uploaded files below.\n"
-            f"{file_context}"
-        )
+        system_content = _build_care_system_message(file_context=file_context)
     elif not use_knowledge_base and KB_ENABLED:
         system_content = (
             "You are a helpful general assistant. "
@@ -154,7 +225,7 @@ def _prepare_chat(
         messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": cleaned})
 
-    return conversation_id, messages, cleaned, kb_sources, kb_used
+    return conversation_id, messages, cleaned, kb_sources, kb_used, kb_context
 
 
 def generate_reply(
@@ -164,7 +235,7 @@ def generate_reply(
     *,
     use_knowledge_base: bool = True,
 ):
-    conversation_id, messages, cleaned, kb_sources, kb_used = _prepare_chat(
+    conversation_id, messages, cleaned, kb_sources, kb_used, kb_context = _prepare_chat(
         message,
         conversation_id,
         file_ids,
@@ -172,8 +243,9 @@ def generate_reply(
     )
 
     response = get_groq_client().chat.completions.create(
-        model=GROQ_MODEL,
+        model=GROQ_CHAT_MODEL,
         messages=messages,
+        max_tokens=GROQ_MAX_TOKENS,
     )
 
     reply = response.choices[0].message.content or ""
@@ -189,6 +261,12 @@ def generate_reply(
     result["kb_used"] = kb_used
     if kb_sources:
         result["kb_sources"] = kb_sources
+    if FAITHFULNESS_ENABLED:
+        faithfulness = check_faithfulness(
+            cleaned, reply, kb_sources=kb_sources, kb_context=kb_context
+        )
+        if faithfulness:
+            result["faithfulness"] = faithfulness
     return result
 
 
@@ -200,7 +278,7 @@ def stream_reply_events(
     use_knowledge_base: bool = True,
 ) -> Iterator[str]:
     """Server-Sent Events: token chunks, then done payload with metadata."""
-    conversation_id, messages, cleaned, kb_sources, kb_used = _prepare_chat(
+    conversation_id, messages, cleaned, kb_sources, kb_used, kb_context = _prepare_chat(
         message,
         conversation_id,
         file_ids,
@@ -209,8 +287,9 @@ def stream_reply_events(
 
     client = get_groq_client()
     stream = client.chat.completions.create(
-        model=GROQ_MODEL,
+        model=GROQ_CHAT_MODEL,
         messages=messages,
+        max_tokens=GROQ_MAX_TOKENS,
         stream=True,
     )
 
@@ -240,5 +319,13 @@ def stream_reply_events(
     done_payload["kb_used"] = kb_used
     if kb_sources:
         done_payload["kb_sources"] = kb_sources
+    if FAITHFULNESS_ENABLED:
+        if kb_sources:
+            yield f"data: {json.dumps({'type': 'verifying'})}\n\n"
+        faithfulness = check_faithfulness(
+            cleaned, reply, kb_sources=kb_sources, kb_context=kb_context
+        )
+        if faithfulness:
+            done_payload["faithfulness"] = faithfulness
 
     yield f"data: {json.dumps(done_payload)}\n\n"

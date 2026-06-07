@@ -7,6 +7,9 @@ const conversationList = document.getElementById("conversation-list");
 const fileInput = document.getElementById("file-input");
 const uploadBtn = document.getElementById("upload-btn");
 const uploadStatus = document.getElementById("upload-status");
+const sidebar = document.getElementById("sidebar");
+const sidebarBackdrop = document.getElementById("sidebar-backdrop");
+const THEME_STORAGE_KEY = "talkflow_theme";
 let isSending = false;
 const API_BASE = window.location.port === "8000"
     ? window.location.origin
@@ -26,6 +29,14 @@ function escapeHtml(value) {
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
+}
+
+function formatAssistantText(text) {
+    if (!text) return text;
+    return String(text)
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "$1")
+        .replace(/^#{1,6}\s+/gm, "");
 }
 
 function scrollMessageIntoView(messageEl, behavior = "smooth") {
@@ -122,16 +133,48 @@ function renderRestoringState() {
     `;
 }
 
-function formatKbSources(sources) {
-    if (!sources?.length) return "";
-    const lines = sources.map((s) => {
-        const page = s.page_number != null ? `, p.${s.page_number}` : "";
-        return `${s.index}. ${s.title || "Document"}${page}`;
-    });
-    return `Sources: ${lines.join(" · ")}`;
+function createFaithfulnessBadge(faithfulness, kbUsed) {
+    return null;
 }
 
-function createMessageElement(role, text, { typing = false, isError = false, kbSources = null } = {}) {
+function formatSourcePages(s) {
+    const pages = Array.isArray(s.pages) && s.pages.length
+        ? s.pages
+        : (s.page_number != null ? [s.page_number] : []);
+    if (!pages.length) return "";
+    if (pages.length === 1) return `, p.${pages[0]}`;
+    if (pages.length <= 5) return ` (pp. ${pages.join(", ")})`;
+    return ` (pp. ${pages.slice(0, 4).join(", ")} +${pages.length - 4} more)`;
+}
+
+function renderKbSourcesElement(sources) {
+    if (!sources?.length) return null;
+    const wrap = document.createElement("div");
+    wrap.className = "kb-sources";
+    const label = document.createElement("span");
+    label.className = "kb-sources-label";
+    const docCount = sources.length;
+    label.textContent = docCount === 1 ? "Source (1 document)" : `Sources (${docCount} documents)`;
+    wrap.appendChild(label);
+    const list = document.createElement("ul");
+    list.className = "kb-sources-list";
+    sources.forEach((s) => {
+        const item = document.createElement("li");
+        item.textContent = `${s.index}. ${s.title || "Document"}${formatSourcePages(s)}`;
+        list.appendChild(item);
+    });
+    wrap.appendChild(list);
+    return wrap;
+}
+
+function appendMessageMeta(bubble, { kbSources = null, faithfulness = null, kbUsed = false } = {}) {
+    const sourcesEl = renderKbSourcesElement(kbSources);
+    if (sourcesEl) bubble.appendChild(sourcesEl);
+    const faithEl = createFaithfulnessBadge(faithfulness, kbUsed);
+    if (faithEl) bubble.appendChild(faithEl);
+}
+
+function createMessageElement(role, text, { typing = false, isError = false, kbSources = null, faithfulness = null, kbUsed = false } = {}) {
     const row = document.createElement("article");
     row.className = `msg-row ${role}`;
     if (isError) {
@@ -149,12 +192,9 @@ function createMessageElement(role, text, { typing = false, isError = false, kbS
         bubble.classList.add("typing");
         bubble.innerHTML = `${escapeHtml(text)}<span class="typing-indicator"><span></span><span></span><span></span></span>`;
     } else {
-        bubble.textContent = text;
-        if (role === "assistant" && kbSources?.length) {
-            const sourcesEl = document.createElement("p");
-            sourcesEl.className = "kb-sources";
-            sourcesEl.textContent = formatKbSources(kbSources);
-            bubble.appendChild(sourcesEl);
+        bubble.textContent = role === "assistant" ? formatAssistantText(text) : text;
+        if (role === "assistant") {
+            appendMessageMeta(bubble, { kbSources, faithfulness, kbUsed });
         }
     }
 
@@ -164,9 +204,9 @@ function createMessageElement(role, text, { typing = false, isError = false, kbS
 }
 
 function appendMessage(role, text, options = {}) {
-    const { typing = false, isError = false, scroll: shouldScroll = true, kbSources = null } = options;
+    const { typing = false, isError = false, scroll: shouldScroll = true, kbSources = null, faithfulness = null, kbUsed = false } = options;
     clearTransientState();
-    const messageEl = createMessageElement(role, text, { typing, isError, kbSources });
+    const messageEl = createMessageElement(role, text, { typing, isError, kbSources, faithfulness, kbUsed });
     chatBox.appendChild(messageEl);
 
     if (!shouldScroll) {
@@ -292,6 +332,8 @@ async function submitMessage(rawText) {
             const streamText = streamBubble.querySelector(".msg");
             let fullReply = "";
             let kbSources = null;
+            let faithfulness = null;
+            let kbUsed = false;
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -314,10 +356,15 @@ async function submitMessage(rawText) {
                     }
                     if (payload.type === "token" && payload.content) {
                         fullReply += payload.content;
-                        streamText.textContent = fullReply;
+                        streamText.textContent = formatAssistantText(fullReply);
                         scrollMessageIntoView(streamBubble, "auto");
                     } else if (payload.type === "error") {
                         throw new Error(payload.detail || "Stream failed");
+                    } else if (payload.type === "verifying") {
+                        const verifyEl = document.createElement("p");
+                        verifyEl.className = "verifying-label";
+                        verifyEl.textContent = "Verifying sources…";
+                        streamText.appendChild(verifyEl);
                     } else if (payload.type === "done") {
                         if (payload.conversation_id) {
                             setCurrentConversationId(payload.conversation_id);
@@ -325,17 +372,16 @@ async function submitMessage(rawText) {
                         }
                         fullReply = payload.reply || fullReply;
                         kbSources = payload.kb_sources || null;
+                        faithfulness = payload.faithfulness || null;
+                        kbUsed = Boolean(payload.kb_used);
+                        const verifyEl = streamText.querySelector(".verifying-label");
+                        if (verifyEl) verifyEl.remove();
                     }
                 }
             }
 
-            streamText.textContent = fullReply || "No response received.";
-            if (kbSources?.length) {
-                const sourcesEl = document.createElement("p");
-                sourcesEl.className = "kb-sources";
-                sourcesEl.textContent = formatKbSources(kbSources);
-                streamText.appendChild(sourcesEl);
-            }
+            streamText.textContent = formatAssistantText(fullReply) || "No response received.";
+            appendMessageMeta(streamText, { kbSources, faithfulness, kbUsed });
             const prev = streamBubble.previousElementSibling;
             if (prev?.classList.contains("msg-row")) {
                 scrollMessageIntoView(prev);
@@ -349,6 +395,8 @@ async function submitMessage(rawText) {
             typingMessage.remove();
             appendMessage("assistant", data.reply || "No response received.", {
                 kbSources: data.kb_sources || null,
+                faithfulness: data.faithfulness || null,
+                kbUsed: Boolean(data.kb_used),
             });
         }
         
@@ -373,6 +421,7 @@ async function submitMessage(rawText) {
 }
 
 function resetChat() {
+    closeSidebar();
     setCurrentConversationId(null);
     clearPendingFirstMessage();
     clearUploadedFiles();
@@ -556,7 +605,40 @@ async function clearHistory() {
     }
 }
 
+function closeSidebar() {
+    sidebar?.classList.remove("open");
+    sidebarBackdrop?.classList.remove("open");
+    if (sidebarBackdrop) sidebarBackdrop.hidden = true;
+}
+
+function openSidebar() {
+    sidebar?.classList.add("open");
+    sidebarBackdrop?.classList.add("open");
+    if (sidebarBackdrop) sidebarBackdrop.hidden = false;
+}
+
+function initTheme() {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    const theme = stored || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    document.documentElement.dataset.theme = theme;
+    updateThemeToggleLabel(theme);
+}
+
+function updateThemeToggleLabel(theme) {
+    const label = document.getElementById("theme-toggle-label");
+    if (label) label.textContent = theme === "light" ? "Dark mode" : "Light mode";
+}
+
+function toggleTheme() {
+    const current = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    const next = current === "light" ? "dark" : "light";
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+    updateThemeToggleLabel(next);
+}
+
 async function loadConversation(conversationId, options = {}) {
+    closeSidebar();
     setCurrentConversationId(conversationId);
 
     try {
@@ -788,6 +870,10 @@ chatBox.addEventListener("click", (event) => {
     submitMessage(prompt);
 });
 
+if (sidebarBackdrop) sidebarBackdrop.addEventListener("click", closeSidebar);
+document.getElementById("menu-btn")?.addEventListener("click", openSidebar);
+document.getElementById("theme-toggle-btn")?.addEventListener("click", toggleTheme);
+
 function isKnowledgeBaseEnabled() {
     if (!kbServerEnabled) return false;
     const toggle = document.getElementById("kb-toggle-input");
@@ -865,6 +951,7 @@ async function loadKbStatus() {
     }
 }
 
+initTheme();
 autoResizeInput();
 initializeChatBox();
 bindKbToggle();

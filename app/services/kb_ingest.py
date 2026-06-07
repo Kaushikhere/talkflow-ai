@@ -11,6 +11,7 @@ from app.database import (
     update_kb_document,
 )
 from app.services.document_extraction import extract_pdf_metadata, extract_pdf_pages
+from app.services.kb_chunk_filter import is_quality_chunk
 from app.services.kb_chunking import chunk_text
 from app.services.kb_embeddings import (
     add_chunks,
@@ -119,21 +120,31 @@ def ingest_pdf_from_path(
     all_metas: list[dict] = []
 
     title_prefix = f"Document: {doc_title}\n\n"
+    filtered_count = 0
+    stored_chunk_index = 0
 
     for page_number, page_text in enumerate(pages, start=1):
-        for chunk_index, chunk in enumerate(chunk_text(page_text)):
+        for chunk in chunk_text(page_text):
+            if not is_quality_chunk(chunk):
+                filtered_count += 1
+                continue
             all_chunks.append(title_prefix + chunk)
-            all_ids.append(f"doc_{document_id}_p{page_number}_c{chunk_index}")
+            all_ids.append(f"doc_{document_id}_p{page_number}_c{stored_chunk_index}")
             all_metas.append(
                 {
                     "title": doc_title,
                     "source_url": catalog_url,
                     "page_number": page_number,
                     "document_id": document_id,
-                    "chunk_index": chunk_index,
+                    "chunk_index": stored_chunk_index,
                     "file_source_url": src_url,
                 }
             )
+            stored_chunk_index += 1
+
+    if not all_chunks:
+        update_kb_document(document_id, status="failed")
+        raise ValueError(f"No quality chunks after filtering: {path.name}")
 
     delete_chunks_for_document(document_id)
     add_chunks(all_chunks, ids=all_ids, metadatas=all_metas)
@@ -145,10 +156,11 @@ def ingest_pdf_from_path(
     )
 
     logger.info(
-        "Indexed %s: %d pages, %d chunks (method pages=%d)",
+        "Indexed %s: %d pages, %d chunks, %d filtered (method pages=%d)",
         path.name,
         len(pages),
         len(all_chunks),
+        filtered_count,
         metadata_extra.get("pdf_pages"),
     )
 
