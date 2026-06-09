@@ -13,6 +13,8 @@ from app.routers.chat import router as chat_router
 from app.routers.kb import router as kb_router
 from app.routers.uploads import router as uploads_router
 
+_FRONTEND_INDEX = BASE_DIR / "frontend" / "index.html"
+
 
 def create_app() -> FastAPI:
     app = FastAPI()
@@ -48,13 +50,17 @@ def create_app() -> FastAPI:
                 exc,
             )
 
-    @app.get("/")
-    def home():
+    @app.get("/health")
+    def health():
         return {"message": "Server is running"}
+
+    @app.get("/")
+    def frontend_home():
+        return FileResponse(_FRONTEND_INDEX)
 
     @app.get("/app")
     def frontend_app():
-        return FileResponse(BASE_DIR / "frontend" / "index.html")
+        return FileResponse(_FRONTEND_INDEX)
 
     app.include_router(chat_router)
     app.include_router(kb_router)

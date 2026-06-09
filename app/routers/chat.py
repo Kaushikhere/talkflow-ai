@@ -9,6 +9,7 @@ from app.database import (
 )
 from app.models import ChatRequest
 from app.services.chat_service import generate_reply, stream_reply_events
+from app.services.conversation_summary import summarize_conversation
 
 router = APIRouter()
 
@@ -82,3 +83,8 @@ def conversation_messages(
             for row in rows
         ]
     }
+
+
+@router.post("/conversations/{conversation_id}/summarize")
+def summarize_chat(conversation_id: int):
+    return summarize_conversation(conversation_id)

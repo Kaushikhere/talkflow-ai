@@ -11,13 +11,13 @@ const sidebar = document.getElementById("sidebar");
 const sidebarBackdrop = document.getElementById("sidebar-backdrop");
 const THEME_STORAGE_KEY = "talkflow_theme";
 let isSending = false;
-const API_BASE = window.location.port === "8000"
-    ? window.location.origin
-    : "http://127.0.0.1:8000";
+const API_BASE = window.location.origin;
 const PENDING_FIRST_MESSAGE_KEY = "talkflow_pending_first_message";
 const KB_USE_STORAGE_KEY = "talkflow_use_knowledge_base";
 let currentConversationId = null;
 let kbServerEnabled = false;
+let kbUploadInProgress = false;
+let isSummarizing = false;
 localStorage.removeItem("talkflow_active_conversation_id");
 let uploadedFileIds = [];
 const uploadedFileNames = new Map();
@@ -231,6 +231,7 @@ function setUiState(sending) {
     isSending = sending;
     input.disabled = sending;
     sendBtn.disabled = sending;
+    updateSummarizeButton();
 }
 
 function setCurrentConversationId(conversationId) {
@@ -240,6 +241,87 @@ function setCurrentConversationId(conversationId) {
         const id = Number(row.dataset.conversationId);
         row.classList.toggle("active", id === conversationId);
     });
+
+    updateSummarizeButton();
+}
+
+function countChatMessages() {
+    return chatBox.querySelectorAll(".msg-row:not(.chat-summary)").length;
+}
+
+function updateSummarizeButton() {
+    const btn = document.getElementById("summarize-chat-btn");
+    if (!btn) return;
+    btn.disabled = !currentConversationId || countChatMessages() < 2 || isSummarizing || isSending;
+}
+
+function appendSummaryMessage(text, messageCount, truncated = false) {
+    clearTransientState();
+    const row = document.createElement("article");
+    row.className = "msg-row assistant chat-summary";
+
+    const avatar = document.createElement("div");
+    avatar.className = "msg-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    avatar.textContent = "AI";
+
+    const bubble = document.createElement("div");
+    bubble.className = "msg";
+
+    const label = document.createElement("p");
+    label.className = "chat-summary-label";
+    label.textContent = truncated
+        ? `Conversation summary · ${messageCount} messages (early messages trimmed)`
+        : `Conversation summary · ${messageCount} messages`;
+    bubble.appendChild(label);
+
+    const body = document.createElement("div");
+    body.className = "chat-summary-body";
+    body.textContent = formatAssistantText(text);
+    bubble.appendChild(body);
+
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    chatBox.appendChild(row);
+    scrollMessageIntoView(row);
+    return row;
+}
+
+async function summarizeCurrentChat() {
+    if (!currentConversationId || isSummarizing || countChatMessages() < 2) return;
+
+    isSummarizing = true;
+    updateSummarizeButton();
+    closeSidebar();
+
+    const pending = appendMessage("assistant", "Summarizing this conversation…", {
+        typing: true,
+        scroll: true,
+    });
+
+    try {
+        const response = await fetch(
+            `${API_BASE}/conversations/${currentConversationId}/summarize`,
+            { method: "POST" },
+        );
+        if (!response.ok) {
+            let detail = response.statusText;
+            try {
+                const err = await response.json();
+                detail = err.detail || detail;
+            } catch { /* ignore */ }
+            throw new Error(detail);
+        }
+        const data = await response.json();
+        pending.remove();
+        appendSummaryMessage(data.summary, data.message_count, data.truncated);
+    } catch (error) {
+        pending.remove();
+        appendMessage("assistant", `Could not summarize: ${error.message}`, { isError: true });
+    } finally {
+        isSummarizing = false;
+        updateSummarizeButton();
+    }
 }
 
 function setPendingFirstMessage(message) {
@@ -406,6 +488,7 @@ async function submitMessage(rawText) {
         }
         
         loadConversations();
+        updateSummarizeButton();
     } catch (error) {
         typingMessage.remove();
         appendMessage(
@@ -672,6 +755,7 @@ async function loadConversation(conversationId, options = {}) {
 
         scrollToLastExchange();
 
+        updateSummarizeButton();
         return messages.length;
 
     } catch (error) {
@@ -839,6 +923,9 @@ function removeUploadedFile(fileId) {
 
 sendBtn.addEventListener("click", () => submitMessage(input.value));
 newChatBtn.addEventListener("click", () => resetChat());
+document.getElementById("summarize-chat-btn")?.addEventListener("click", () => {
+    void summarizeCurrentChat();
+});
 clearHistoryBtn.addEventListener("click", clearHistory);
 uploadBtn.addEventListener("click", () => {
     fileInput.click();
@@ -929,32 +1016,125 @@ function updateKbHeaderBadge() {
 async function loadKbStatus() {
     const el = document.getElementById("kb-status");
     const panel = document.getElementById("kb-panel");
+    const docsPanel = document.getElementById("kb-docs-panel");
     if (!el) return;
     try {
-        const response = await fetch(`${API_BASE}/kb/status`);
+        const response = await fetch(`${API_BASE}/kb/status?light=1`);
         if (!response.ok) return;
         const data = await response.json();
         kbServerEnabled = Boolean(data.enabled);
         if (!kbServerEnabled) {
             el.hidden = true;
             if (panel) panel.hidden = true;
+            if (docsPanel) docsPanel.hidden = true;
             return;
         }
         if (panel) panel.hidden = false;
+        if (docsPanel) docsPanel.hidden = false;
         el.hidden = false;
         updateKbHeaderBadge();
         updateComposerHint();
     } catch {
         el.hidden = true;
         if (panel) panel.hidden = true;
+        if (docsPanel) docsPanel.hidden = true;
         kbServerEnabled = false;
     }
+}
+
+function setKbUploadMsg(text, type = "") {
+    const el = document.getElementById("kb-upload-msg");
+    if (!el) return;
+    el.textContent = text || "";
+    el.className = `kb-upload-msg${type ? ` ${type}` : ""}`;
+}
+
+function setKbDropzoneBusy(busy, label) {
+    const dropzone = document.getElementById("kb-dropzone");
+    const labelEl = dropzone?.querySelector(".kb-dropzone-label");
+    if (dropzone) dropzone.classList.toggle("kb-dropzone-busy", busy);
+    if (labelEl && label) labelEl.textContent = label;
+    else if (labelEl && !busy) labelEl.textContent = "Upload PDF to knowledge base";
+}
+
+async function uploadKbDocument(file) {
+    if (kbUploadInProgress) return;
+    if (!file || !file.name.toLowerCase().endsWith(".pdf")) {
+        setKbUploadMsg("Only PDF files are supported.", "error");
+        return;
+    }
+
+    kbUploadInProgress = true;
+    setKbDropzoneBusy(true, "Uploading…");
+    setKbUploadMsg("Uploading…");
+
+    const form = new FormData();
+    form.append("file", file);
+
+    try {
+        const response = await fetch(`${API_BASE}/kb/documents/upload`, {
+            method: "POST",
+            body: form,
+        });
+        if (!response.ok) {
+            let detail = response.statusText;
+            try {
+                const err = await response.json();
+                detail = err.detail || detail;
+            } catch { /* ignore */ }
+            throw new Error(detail);
+        }
+        const result = await response.json();
+        const status = (result.status || "indexed").toLowerCase();
+        const name = result.title || file.name.replace(/\.pdf$/i, "");
+        if (status === "skipped") {
+            setKbUploadMsg(`"${name}" is already in the knowledge base.`, "ok");
+        } else {
+            setKbUploadMsg(`"${name}" added — indexing in background.`, "ok");
+        }
+    } catch (err) {
+        setKbUploadMsg(err.message || "Upload failed", "error");
+    } finally {
+        kbUploadInProgress = false;
+        setKbDropzoneBusy(false);
+        const input = document.getElementById("kb-file-input");
+        if (input) input.value = "";
+    }
+}
+
+function bindKbDocsPanel() {
+    const dropzone = document.getElementById("kb-dropzone");
+    const fileInput = document.getElementById("kb-file-input");
+    if (!dropzone || !fileInput) return;
+
+    dropzone.addEventListener("click", (e) => {
+        if (kbUploadInProgress) return;
+        e.preventDefault();
+        fileInput.click();
+    });
+    dropzone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        if (!kbUploadInProgress) dropzone.classList.add("kb-dropzone-active");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("kb-dropzone-active"));
+    dropzone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("kb-dropzone-active");
+        if (kbUploadInProgress) return;
+        const file = e.dataTransfer?.files?.[0];
+        if (file) void uploadKbDocument(file);
+    });
+    fileInput.addEventListener("change", () => {
+        const file = fileInput.files?.[0];
+        if (file) void uploadKbDocument(file);
+    });
 }
 
 initTheme();
 autoResizeInput();
 initializeChatBox();
 bindKbToggle();
+bindKbDocsPanel();
 void loadKbStatus();
 
 loadConversations().then((conversations) => {

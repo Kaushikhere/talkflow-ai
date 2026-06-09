@@ -81,11 +81,36 @@ def main(dry_run: bool = False) -> int:
     if DB_PATH.exists() and deleted_rels:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
+        doc_ids: list[int] = []
+        for rel in deleted_rels:
+            for path_key in (rel, rel.replace("/", "\\")):
+                cur.execute("SELECT id FROM kb_documents WHERE raw_path = ?", (path_key,))
+                doc_ids.extend(row[0] for row in cur.fetchall())
+        doc_ids = list(dict.fromkeys(doc_ids))
+
+        chroma_cleared = 0
+        if doc_ids:
+            try:
+                import chromadb
+                from chromadb.utils.embedding_functions import (
+                    SentenceTransformerEmbeddingFunction,
+                )
+
+                client = chromadb.PersistentClient(path=str(ROOT / "data" / "chroma"))
+                ef = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+                col = client.get_or_create_collection("talkflow_kb", embedding_function=ef)
+                for doc_id in doc_ids:
+                    if col.get(where={"document_id": doc_id}, limit=1).get("ids"):
+                        col.delete(where={"document_id": doc_id})
+                        chroma_cleared += 1
+            except Exception as exc:
+                print(f"  [warn] Chroma delete skipped: {exc}")
+            print(f"Cleared Chroma chunks for {chroma_cleared} document(s)")
+
         removed = 0
         for rel in deleted_rels:
             cur.execute("DELETE FROM kb_documents WHERE raw_path = ?", (rel,))
             removed += cur.rowcount
-            # Windows paths may be stored with backslashes
             alt = rel.replace("/", "\\")
             if alt != rel:
                 cur.execute("DELETE FROM kb_documents WHERE raw_path = ?", (alt,))
@@ -94,8 +119,7 @@ def main(dry_run: bool = False) -> int:
         conn.close()
         print(f"Removed {removed} kb_documents row(s) for deleted files")
 
-    print("\nDone. Re-run ingest if you want Chroma aligned:")
-    print("  .\\.venv\\Scripts\\python.exe scripts\\run_kb_pipeline.py --no-scrape")
+    print("\nDone.")
     return 0
 
 

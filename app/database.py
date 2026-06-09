@@ -9,8 +9,11 @@ def utc_now() -> str:
 
 
 def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -439,6 +442,21 @@ def list_kb_documents(*, source: str | None = None) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def count_indexed_docs_missing_chroma(
+    has_chunks: callable,
+) -> int:
+    """Indexed SQLite rows with no matching Chroma chunks."""
+    conn = get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT id FROM kb_documents
+        WHERE status = 'indexed'
+        """
+    ).fetchall()
+    conn.close()
+    return sum(1 for row in rows if not has_chunks(row["id"]))
+
+
 def get_kb_stats() -> dict:
     conn = get_db_connection()
     row = conn.execute(
@@ -536,6 +554,34 @@ def get_kb_document_by_source_url(source_url: str) -> dict | None:
     return dict(row)
 
 
+def get_kb_document_by_content_hash(content_hash: str) -> dict | None:
+    conn = get_db_connection()
+    row = conn.execute(
+        """
+        SELECT id, source_url, title, content_hash, raw_path, status, chunk_count,
+               created_at, updated_at
+        FROM kb_documents
+        WHERE content_hash = ?
+        ORDER BY id
+        LIMIT 1
+        """,
+        (content_hash,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def delete_kb_document(document_id: int) -> bool:
+    conn = get_db_connection()
+    cursor = conn.execute("DELETE FROM kb_documents WHERE id = ?", (document_id,))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+
 def insert_kb_document(
     *,
     source_url: str,
@@ -567,6 +613,7 @@ def update_kb_document(
     chunk_count: int | None = None,
     content_hash: str | None = None,
     title: str | None = None,
+    raw_path: str | None = None,
 ) -> None:
     fields: list[str] = ["updated_at = ?"]
     values: list = [utc_now()]
@@ -583,6 +630,9 @@ def update_kb_document(
     if title is not None:
         fields.append("title = ?")
         values.append(title)
+    if raw_path is not None:
+        fields.append("raw_path = ?")
+        values.append(raw_path)
 
     values.append(document_id)
     conn = get_db_connection()

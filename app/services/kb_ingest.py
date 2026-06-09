@@ -6,6 +6,7 @@ from app.config import BASE_DIR, KB_DATA_DIR, KB_DEFAULT_SOURCE_URL, KB_EXTERNAL
 from app.database import (
     create_kb_ingest_run,
     finish_kb_ingest_run,
+    get_kb_document_by_content_hash,
     get_kb_document_by_source_url,
     insert_kb_document,
     update_kb_document,
@@ -76,6 +77,16 @@ def ingest_pdf_from_path(
         rel_raw = str(path.resolve())
 
     existing = get_kb_document_by_source_url(src_url)
+    if not existing:
+        hash_match = get_kb_document_by_content_hash(content_hash)
+        if hash_match:
+            existing = hash_match
+            logger.info(
+                "Matched existing document id=%s by content_hash for %s",
+                existing["id"],
+                path.name,
+            )
+
     if (
         not force
         and existing
@@ -83,11 +94,15 @@ def ingest_pdf_from_path(
         and existing["status"] == "indexed"
         and chroma_has_document_chunks(existing["id"])
     ):
+        if existing.get("raw_path") != rel_raw:
+            update_kb_document(existing["id"], raw_path=rel_raw)
+        if doc_title and existing.get("title") != doc_title:
+            update_kb_document(existing["id"], title=doc_title)
         logger.info("PDF already indexed: %s", src_url)
         return {
             "document_id": existing["id"],
-            "source_url": src_url,
-            "title": existing["title"],
+            "source_url": existing["source_url"],
+            "title": existing.get("title") or doc_title,
             "chunk_count": existing["chunk_count"],
             "status": "skipped",
         }

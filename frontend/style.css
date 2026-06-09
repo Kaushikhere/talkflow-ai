@@ -158,6 +158,7 @@ body {
 /* Sidebar */
 .sidebar {
     width: var(--sidebar-w);
+    height: 100vh;
     background: var(--sidebar-bg);
     backdrop-filter: blur(28px) saturate(1.5);
     border-right: 1px solid var(--glass-border);
@@ -168,12 +169,14 @@ body {
     gap: 14px;
     flex-shrink: 0;
     z-index: 50;
+    overflow: hidden;
 }
 
 .sidebar-top {
     display: flex;
     flex-direction: column;
     gap: 16px;
+    flex-shrink: 0;
 }
 
 .brand {
@@ -343,6 +346,7 @@ body {
 }
 
 .sidebar-footer {
+    flex-shrink: 0;
     padding-top: 8px;
     border-top: 1px solid var(--glass-border);
 }
@@ -423,8 +427,84 @@ body {
 }
 
 .side-section-history {
-    flex: 1;
+    flex: 1 1 0;
     min-height: 0;
+    overflow: hidden;
+}
+
+.kb-docs-panel {
+    flex: 0 0 auto;
+}
+
+.kb-docs-upload {
+    flex-shrink: 0;
+}
+
+.kb-dropzone {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 10px;
+    border-radius: var(--radius);
+    border: 1px dashed rgba(124, 58, 237, 0.4);
+    background: var(--kb-panel-bg);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s var(--ease), background 0.2s var(--ease), opacity 0.2s var(--ease);
+    user-select: none;
+}
+
+.kb-dropzone:hover,
+.kb-dropzone:focus-visible,
+.kb-dropzone-active {
+    border-color: rgba(124, 58, 237, 0.7);
+    background: rgba(124, 58, 237, 0.1);
+    color: var(--text);
+}
+
+.kb-dropzone-busy {
+    opacity: 0.65;
+    pointer-events: none;
+    cursor: wait;
+}
+
+.kb-dropzone-busy .kb-dropzone-spinner {
+    display: inline-block;
+}
+
+.kb-dropzone-spinner {
+    display: none;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(124, 58, 237, 0.25);
+    border-top-color: var(--accent-text);
+    border-radius: 50%;
+    animation: kb-spin 0.7s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes kb-spin {
+    to { transform: rotate(360deg); }
+}
+
+.kb-upload-msg {
+    margin-top: 6px;
+    min-height: 16px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.kb-upload-msg.ok {
+    color: var(--success);
+}
+
+.kb-upload-msg.error {
+    color: var(--danger);
 }
 
 .kb-toggle {
@@ -1065,6 +1145,25 @@ body {
     border-color: rgba(248, 113, 113, 0.35);
     background: rgba(248, 113, 113, 0.10);
     color: var(--danger);
+}
+
+.chat-summary .msg {
+    border-color: rgba(6, 182, 212, 0.35);
+    background: linear-gradient(180deg, rgba(6, 182, 212, 0.08) 0%, rgba(6, 182, 212, 0.04) 100%);
+}
+
+.chat-summary-label {
+    margin: 0 0 8px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent-cyan-soft);
+}
+
+.chat-summary-body {
+    white-space: pre-wrap;
+    line-height: 1.55;
 }
 
 .verifying-label {

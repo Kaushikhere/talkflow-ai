@@ -4,19 +4,34 @@ from __future__ import annotations
 import logging
 import os
 
-from app.config import KB_RERANK_ENABLED, KB_RERANK_MODEL
+from app.config import (
+    KB_RERANK_BATCH_SIZE,
+    KB_RERANK_ENABLED,
+    KB_RERANK_MAX_CHARS,
+    KB_RERANK_MODEL,
+)
 
 logger = logging.getLogger(__name__)
-
-MAX_RERANK_CHARS = 512
 
 _reranker = None
 _reranker_unavailable = False
 
 
+def _limit_cpu_threads() -> None:
+    """Avoid oversubscribing CPU during cross-encoder inference."""
+    try:
+        import torch
+
+        threads = int(os.getenv("KB_RERANK_THREADS", "2"))
+        torch.set_num_threads(max(1, threads))
+    except ImportError:
+        pass
+
+
 def _load_cross_encoder():
     from sentence_transformers import CrossEncoder
 
+    _limit_cpu_threads()
     try:
         os.environ["HF_HUB_OFFLINE"] = "1"
         model = CrossEncoder(
@@ -54,22 +69,43 @@ def get_reranker():
     return _reranker
 
 
+def reset_reranker() -> None:
+    """Clear cached model (used after config changes in tests)."""
+    global _reranker, _reranker_unavailable
+    _reranker = None
+    _reranker_unavailable = False
+
+
 def warmup_kb_reranker() -> None:
     if not KB_RERANK_ENABLED:
         return
     model = get_reranker()
     if model is None:
         return
-    model.predict([("warmup query", "warmup document text")])
-    logger.info("KB reranker warmed up")
+    model.predict(
+        [("warmup query", "warmup document text")],
+        batch_size=1,
+        show_progress_bar=False,
+    )
+    logger.info("KB reranker warmed up (%s)", KB_RERANK_MODEL)
+
+
+def _passage_for_rerank(hit: dict) -> str:
+    """Build passage text for cross-encoder; include product title when available."""
+    text = (hit.get("text") or "").strip()
+    meta = hit.get("metadata") or {}
+    title = (meta.get("title") or "").strip()
+    if title and not text.lower().startswith("document:"):
+        passage = f"{title}. {text}"
+    else:
+        passage = text
+    return passage[:KB_RERANK_MAX_CHARS]
 
 
 def rerank_hits(query: str, hits: list[dict], *, top_k: int) -> list[dict]:
-    """Score (query, chunk) pairs and return the top_k most relevant hits."""
+    """Score (query, chunk) pairs with a cross-encoder and return the top_k hits."""
     if not KB_RERANK_ENABLED or not hits:
         return hits[:top_k]
-    if len(hits) <= top_k:
-        return hits
 
     cleaned = query.strip()
     if not cleaned:
@@ -79,11 +115,12 @@ def rerank_hits(query: str, hits: list[dict], *, top_k: int) -> list[dict]:
     if model is None:
         return hits[:top_k]
 
-    pairs = [
-        (cleaned, ((hit.get("text") or "").strip())[:MAX_RERANK_CHARS])
-        for hit in hits
-    ]
-    scores = model.predict(pairs)
+    pairs = [(cleaned, _passage_for_rerank(hit)) for hit in hits]
+    scores = model.predict(
+        pairs,
+        batch_size=KB_RERANK_BATCH_SIZE,
+        show_progress_bar=False,
+    )
 
     ranked: list[dict] = []
     for hit, score in zip(hits, scores):

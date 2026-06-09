@@ -11,7 +11,7 @@ UPLOADS_DIR = BASE_DIR / "uploads"
 
 OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "30"))
 GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
-GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "2048"))
+GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "1536"))
 GROQ_VISION_MODEL = os.getenv(
     "GROQ_VISION_MODEL",
     "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -34,20 +34,24 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 KB_ENABLED = _env_bool("KB_ENABLED", False)
-KB_TOP_K = int(os.getenv("KB_TOP_K", "12"))
-KB_RETRIEVE_POOL = int(os.getenv("KB_RETRIEVE_POOL", "24"))
-KB_RERANK_POOL = int(os.getenv("KB_RERANK_POOL", "20"))
+KB_TOP_K = int(os.getenv("KB_TOP_K", "10"))
+KB_RETRIEVE_POOL = int(os.getenv("KB_RETRIEVE_POOL", "20"))
+KB_RERANK_POOL = int(os.getenv("KB_RERANK_POOL", "16"))
 KB_RERANK_ENABLED = _env_bool("KB_RERANK_ENABLED", True)
+# Fast default; use BAAI/bge-reranker-base in .env for higher retrieval quality (slower)
 KB_RERANK_MODEL = os.getenv(
     "KB_RERANK_MODEL",
     "cross-encoder/ms-marco-MiniLM-L-6-v2",
 )
+KB_RERANK_MAX_CHARS = int(os.getenv("KB_RERANK_MAX_CHARS", "512"))
+KB_RERANK_BATCH_SIZE = int(os.getenv("KB_RERANK_BATCH_SIZE", "32"))
 MAX_CHAT_HISTORY = int(os.getenv("MAX_CHAT_HISTORY", "20"))
 KB_CHUNK_SIZE = int(os.getenv("KB_CHUNK_SIZE", "800"))
 KB_CHUNK_MIN_CHARS = int(os.getenv("KB_CHUNK_MIN_CHARS", "50"))
 KB_CHUNK_FILTER_ENABLED = _env_bool("KB_CHUNK_FILTER_ENABLED", True)
 FAITHFULNESS_ENABLED = _env_bool("FAITHFULNESS_ENABLED", False)
 FAITHFULNESS_MODEL = os.getenv("FAITHFULNESS_MODEL", "llama-3.1-8b-instant")
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip() or None
 KB_DATA_DIR = BASE_DIR / "data" / "kb"
 KB_EXTERNAL_DIR = KB_DATA_DIR / "external"
 CHROMA_PATH = BASE_DIR / "data" / "chroma"

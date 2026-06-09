@@ -159,9 +159,25 @@ def main(dry_run: bool = False) -> int:
         conn.close()
         return 0
 
+    drop_rows = [r for r in rows if r["id"] in to_delete]
     print("Deleting Chroma chunks for duplicate docs...")
     chroma_deleted = _chroma_delete(list(to_delete))
     print(f"  Chroma collections cleared: {chroma_deleted}")
+
+    files_removed = 0
+    for row in drop_rows:
+        raw = row.get("raw_path")
+        if not raw:
+            continue
+        pdf_path = (ROOT / raw).resolve()
+        try:
+            pdf_path.relative_to((ROOT / "data" / "kb").resolve())
+        except ValueError:
+            continue
+        if pdf_path.is_file():
+            pdf_path.unlink()
+            files_removed += 1
+            print(f"  Deleted file {pdf_path.name}")
 
     print("Removing duplicate rows from kb_documents...")
     placeholders = ",".join("?" * len(to_delete))
@@ -170,7 +186,7 @@ def main(dry_run: bool = False) -> int:
         list(to_delete),
     )
     conn.commit()
-    print(f"  Removed {len(to_delete)} rows")
+    print(f"  Removed {len(to_delete)} rows ({files_removed} PDF file(s) deleted)")
 
     conn.close()
     print("\nDone. No re-index needed — kept documents still have their Chroma chunks.")

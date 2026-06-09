@@ -101,6 +101,14 @@ def chroma_has_document_chunks(document_id: int) -> bool:
     return bool(result.get("ids"))
 
 
+def chroma_chunk_count() -> int:
+    """Total vectors in the KB collection."""
+    try:
+        return int(get_collection().count())
+    except Exception:
+        return 0
+
+
 def delete_chunks_for_document(document_id: int) -> None:
     collection = get_collection()
     collection.delete(where={"document_id": document_id})

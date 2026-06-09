@@ -5,7 +5,7 @@ from app.database import get_kb_document_by_id, list_indexed_kb_documents
 from app.services.kb_embeddings import query_chunks, query_chunks_for_document
 from app.services.kb_rerank import rerank_hits
 
-MAX_KB_CONTEXT_CHARS = 24_000
+MAX_KB_CONTEXT_CHARS = 16_000
 
 _QUERY_STOP_WORDS = frozenset(
     {
@@ -262,17 +262,35 @@ def _retrieval_pool_size(final_k: int) -> int:
     return final_k
 
 
-def _rank_candidates(query: str, candidates: list[dict]) -> list[dict]:
-    """Rerank only the top KB_RERANK_POOL candidates (cross-encoder is the main latency cost)."""
+def _should_skip_rerank(query: str, candidates: list[dict]) -> bool:
+    """Skip cross-encoder when embedding/title order is already reliable (saves ~0.5–3s)."""
     if not KB_RERANK_ENABLED or not candidates:
+        return True
+    if _is_catalog_query(query):
+        return True
+    boosted = [h for h in candidates if h.get("title_boosted")]
+    if len(boosted) >= KB_TOP_K:
+        doc_ids = {
+            (h.get("metadata") or {}).get("document_id")
+            for h in boosted[:KB_RERANK_POOL]
+        }
+        doc_ids.discard(None)
+        if len(doc_ids) == 1:
+            return True
+    return False
+
+
+def _rank_candidates(query: str, candidates: list[dict]) -> list[dict]:
+    """Cross-encode the retrieval pool and return hits sorted by relevance."""
+    if _should_skip_rerank(query, candidates):
         return candidates
-    cap = min(len(candidates), KB_RERANK_POOL)
-    if cap <= 0:
+
+    pool_size = min(len(candidates), KB_RERANK_POOL)
+    if pool_size <= 0:
         return candidates
-    head = candidates[:cap]
-    tail = candidates[cap:]
-    ranked_head = rerank_hits(query, head, top_k=len(head))
-    return ranked_head + tail
+
+    to_score = candidates[:pool_size]
+    return rerank_hits(query, to_score, top_k=pool_size)
 
 
 def _title_from_chunk_text(text: str) -> str | None:
