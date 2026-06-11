@@ -62,7 +62,8 @@ def get_reranker():
         except Exception as exc:
             _reranker_unavailable = True
             logger.error(
-                "Reranker unavailable (%s); falling back to embedding order",
+                "Reranker unavailable for %s (%s); falling back to embedding order",
+                KB_RERANK_MODEL,
                 exc,
             )
             return None

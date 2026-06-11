@@ -1,11 +1,15 @@
 import re
 
-from app.config import KB_RERANK_ENABLED, KB_RERANK_POOL, KB_RETRIEVE_POOL, KB_TOP_K
+from app.config import (
+    KB_RERANK_ENABLED,
+    KB_RERANK_POOL,
+    KB_RETRIEVE_POOL,
+    KB_TOP_K,
+    MAX_KB_CONTEXT_CHARS,
+)
 from app.database import get_kb_document_by_id, list_indexed_kb_documents
 from app.services.kb_embeddings import query_chunks, query_chunks_for_document
 from app.services.kb_rerank import rerank_hits
-
-MAX_KB_CONTEXT_CHARS = 16_000
 
 _QUERY_STOP_WORDS = frozenset(
     {

@@ -3,15 +3,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "talkflow.db"
 UPLOADS_DIR = BASE_DIR / "uploads"
 
 OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "30"))
-GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
-GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "1536"))
+GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "2560"))
 GROQ_VISION_MODEL = os.getenv(
     "GROQ_VISION_MODEL",
     "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -38,14 +38,15 @@ KB_TOP_K = int(os.getenv("KB_TOP_K", "10"))
 KB_RETRIEVE_POOL = int(os.getenv("KB_RETRIEVE_POOL", "20"))
 KB_RERANK_POOL = int(os.getenv("KB_RERANK_POOL", "16"))
 KB_RERANK_ENABLED = _env_bool("KB_RERANK_ENABLED", True)
-# Fast default; use BAAI/bge-reranker-base in .env for higher retrieval quality (slower)
+# Higher quality default; set cross-encoder/ms-marco-MiniLM-L-6-v2 in .env for faster CPU inference
 KB_RERANK_MODEL = os.getenv(
     "KB_RERANK_MODEL",
-    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "BAAI/bge-reranker-base",
 )
-KB_RERANK_MAX_CHARS = int(os.getenv("KB_RERANK_MAX_CHARS", "512"))
+KB_RERANK_MAX_CHARS = int(os.getenv("KB_RERANK_MAX_CHARS", "768"))
 KB_RERANK_BATCH_SIZE = int(os.getenv("KB_RERANK_BATCH_SIZE", "32"))
-MAX_CHAT_HISTORY = int(os.getenv("MAX_CHAT_HISTORY", "20"))
+MAX_CHAT_HISTORY = int(os.getenv("MAX_CHAT_HISTORY", "10"))
+MAX_KB_CONTEXT_CHARS = int(os.getenv("MAX_KB_CONTEXT_CHARS", "20000"))
 KB_CHUNK_SIZE = int(os.getenv("KB_CHUNK_SIZE", "800"))
 KB_CHUNK_MIN_CHARS = int(os.getenv("KB_CHUNK_MIN_CHARS", "50"))
 KB_CHUNK_FILTER_ENABLED = _env_bool("KB_CHUNK_FILTER_ENABLED", True)
