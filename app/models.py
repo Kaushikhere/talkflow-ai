@@ -36,3 +36,8 @@ class PolicyRecommendRequest(BaseModel):
 
 class MaintenanceRequest(BaseModel):
     enabled: bool
+
+
+class AuditChatRequest(BaseModel):
+    message: str
+    stream: bool = True

@@ -6,8 +6,15 @@
     <title>TalkFlow — Care Document AI</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/frontend/style.css?v=12">
+    <link rel="stylesheet" href="/frontend/style.css?v=22">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@600;700&display=swap" rel="stylesheet"></noscript>
+    <script>
+        (function () {
+            var mode = localStorage.getItem("talkflow_app_mode") || "chat";
+            document.documentElement.classList.add("mode-" + mode);
+        })();
+    </script>
 </head>
 <body>
     <div class="ambient" aria-hidden="true">
@@ -33,6 +40,10 @@
                         <span class="brand-tag">Care Health · Document AI</span>
                     </div>
                 </div>
+                <div class="mode-toggle" id="mode-toggle" role="tablist" aria-label="Application mode">
+                    <button type="button" class="mode-toggle-btn active" data-mode="chat" role="tab" aria-selected="true">Chat</button>
+                    <button type="button" class="mode-toggle-btn" data-mode="audit" role="tab" aria-selected="false">Audit</button>
+                </div>
                 <button id="new-chat-btn" class="btn btn-primary btn-block" type="button">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
                         <path d="M12 5v14M5 12h14"/>
@@ -56,12 +67,27 @@
                 </div>
             </section>
 
-            <section class="side-section side-section-history">
+            <section class="side-section side-section-history" id="chat-history-section">
                 <div class="section-head">
                     <h2>Recent chats</h2>
                 </div>
                 <div id="conversation-list" class="history-list">
                     <p class="muted-text">No conversations yet</p>
+                </div>
+            </section>
+
+            <section class="side-section audit-history-section" id="audit-history-section" hidden>
+                <div class="section-head audit-history-head">
+                    <h2>Recent audits</h2>
+                    <button id="audit-compare-toggle-btn" class="btn btn-ghost btn-sm audit-compare-toggle" type="button">Compare policies</button>
+                </div>
+                <div id="audit-compare-actions" class="audit-compare-actions" hidden>
+                    <p id="audit-compare-status" class="muted-text audit-compare-hint">Select exactly 2 policies</p>
+                    <button id="audit-compare-execute-btn" class="btn btn-primary btn-block" type="button" hidden>Execute comparison</button>
+                    <button id="audit-compare-cancel-btn" class="btn btn-ghost btn-block btn-subtle" type="button">Cancel</button>
+                </div>
+                <div id="audit-policy-list" class="history-list">
+                    <p class="muted-text">No policies audited yet</p>
                 </div>
             </section>
 
@@ -113,9 +139,10 @@
                 </button>
             </header>
             <div class="chat-body">
+                <div id="chat-mode-panel" class="mode-panel">
                 <section id="chat-box" class="messages" aria-live="polite"></section>
 
-                <section class="composer">
+                <section class="composer" id="chat-composer">
                     <div class="composer-card">
                         <div id="uploaded-files-list" class="uploaded-files-list" style="display: none;"></div>
                         <div class="composer-input-wrap">
@@ -143,10 +170,118 @@
                     </div>
                     <p id="composer-hint" class="composer-hint">Enter to send · Shift+Enter for new line · Attach PDF or images</p>
                 </section>
+                </div>
+
+                <div id="audit-mode-panel" class="mode-panel audit-panel" hidden>
+                    <div class="audit-toolbar" id="audit-toolbar">
+                        <button id="new-audit-btn" class="btn btn-primary" type="button">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                                <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                            New policy audit
+                        </button>
+                        <button id="audit-upload-again-btn" class="btn btn-ghost" type="button" hidden>
+                            Upload another PDF
+                        </button>
+                        <div id="audit-export-group" class="audit-export-group" hidden>
+                            <button id="audit-export-md-btn" class="btn btn-ghost" type="button" title="Download Markdown report">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+                                Export MD
+                            </button>
+                            <button id="audit-export-pdf-btn" class="btn btn-ghost" type="button" title="Download PDF report">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                                Export PDF
+                            </button>
+                        </div>
+                    </div>
+
+                    <section id="audit-comparison-view" class="audit-comparison-view" hidden>
+                        <div class="audit-comparison-toolbar">
+                            <button id="audit-comparison-back-btn" class="btn btn-link audit-comparison-back-btn" type="button">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                                Back to audit
+                            </button>
+                        </div>
+                        <div id="audit-comparison-winner" class="audit-comparison-winner">
+                            <button id="audit-comparison-close-btn" class="audit-comparison-close-btn" type="button" title="Close comparison" aria-label="Close comparison">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                            </button>
+                            <div id="audit-comparison-winner-content"></div>
+                        </div>
+                        <div id="audit-comparison-columns" class="audit-comparison-columns"></div>
+                    </section>
+
+                    <section id="audit-upload-section" class="audit-upload-section">
+                        <div class="audit-intro">
+                            <h2>Policy Evaluator</h2>
+                            <p>Upload any third-party health insurance policy PDF. We extract key metrics and deliver an objective Buy / Pass / Review verdict.</p>
+                        </div>
+                        <input id="audit-file-input" type="file" accept=".pdf,application/pdf" hidden>
+                        <div id="audit-dropzone" class="kb-dropzone audit-dropzone" role="button" aria-label="Upload policy PDF for audit">
+                            <span class="kb-dropzone-spinner audit-dropzone-spinner" aria-hidden="true"></span>
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                            </svg>
+                            <span class="kb-dropzone-label">Drag &amp; drop a policy PDF here</span>
+                            <span class="audit-dropzone-sub">or click to browse</span>
+                        </div>
+                        <p id="audit-upload-status" class="audit-upload-status" aria-live="polite"></p>
+                    </section>
+
+                    <div id="audit-detail" class="audit-detail" hidden>
+                    <div id="audit-source-backdrop" class="audit-source-backdrop" hidden></div>
+                    <aside id="audit-source-panel" class="audit-source-panel" hidden aria-label="Source citation">
+                        <div class="audit-source-panel-head">
+                            <h4>Source citation</h4>
+                            <button id="audit-source-close" class="btn btn-icon btn-ghost" type="button" aria-label="Close source panel">&times;</button>
+                        </div>
+                        <p id="audit-source-metric-label" class="source-metric-label"></p>
+                        <p id="audit-source-page-label" class="source-page-label"></p>
+                        <blockquote id="audit-source-excerpt" class="source-excerpt"></blockquote>
+                        <p id="audit-source-note" class="source-note muted-text" hidden></p>
+                    </aside>
+                    <section id="audit-results" class="audit-results">
+                        <div class="audit-results-header">
+                            <div class="audit-filename-row">
+                                <h3 id="audit-filename"></h3>
+                                <a id="audit-download-original" class="btn btn-icon btn-ghost audit-file-dl" href="#" title="Download original PDF" hidden>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                                </a>
+                            </div>
+                            <span id="audit-verdict-badge" class="audit-verdict-badge"></span>
+                        </div>
+                        <div id="audit-scorecard" class="audit-scorecard"></div>
+                        <div id="audit-recommendation-banner" class="audit-recommendation-banner" hidden>
+                            <p id="audit-recommendation-headline" class="audit-recommendation-headline"></p>
+                            <p id="audit-recommendation-verdict" class="audit-recommendation-verdict"></p>
+                            <p class="audit-recommendation-missing-label">Critical gaps:</p>
+                            <p id="audit-recommendation-missing" class="audit-recommendation-missing"></p>
+                        </div>
+                        <div class="audit-verdict-block">
+                            <h4>Strategic verdict</h4>
+                            <p id="audit-verdict-text"></p>
+                        </div>
+                        <ul id="audit-risks" class="audit-lists"></ul>
+                        <ul id="audit-strengths" class="audit-lists"></ul>
+                    </section>
+
+                    <section id="audit-followup" class="audit-followup">
+                        <div id="audit-chat-thread" class="audit-chat-thread" aria-live="polite"></div>
+                        <div class="audit-followup-composer">
+                            <textarea id="audit-followup-input" rows="1" placeholder="Ask about this policy…" aria-label="Follow-up question about uploaded policy"></textarea>
+                            <button id="audit-followup-send" class="btn btn-icon btn-send" type="button" title="Send" aria-label="Send follow-up">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                                    <path d="M12 19V5M5 12l7-7 7 7"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </section>
+                    </div>
+                </div>
             </div>
         </main>
     </div>
 
-    <script src="/frontend/script.js?v=16"></script>
+    <script src="/frontend/script.js?v=26"></script>
 </body>
 </html>

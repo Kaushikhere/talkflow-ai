@@ -1,3 +1,12 @@
+(function applyModeBeforePaint() {
+    const mode = localStorage.getItem("talkflow_app_mode") || "chat";
+    document.documentElement.classList.add(`mode-${mode}`);
+    const chatPanel = document.getElementById("chat-mode-panel");
+    const auditPanel = document.getElementById("audit-mode-panel");
+    if (chatPanel) chatPanel.hidden = mode !== "chat";
+    if (auditPanel) auditPanel.hidden = mode !== "audit";
+})();
+
 const chatBox = document.getElementById("chat-box");
 const input = document.getElementById("user-input");
 const sendBtn = document.getElementById("send-btn");
@@ -14,6 +23,8 @@ let isSending = false;
 const API_BASE = window.location.origin;
 const PENDING_FIRST_MESSAGE_KEY = "talkflow_pending_first_message";
 const KB_USE_STORAGE_KEY = "talkflow_use_knowledge_base";
+const APP_MODE_STORAGE_KEY = "talkflow_app_mode";
+const ACTIVE_AUDIT_POLICY_KEY = "talkflow_active_audit_policy_id";
 let currentConversationId = null;
 let kbServerEnabled = false;
 let kbUploadInProgress = false;
@@ -1029,11 +1040,10 @@ async function loadKbStatus() {
             if (docsPanel) docsPanel.hidden = true;
             return;
         }
-        if (panel) panel.hidden = false;
-        if (docsPanel) docsPanel.hidden = false;
         el.hidden = false;
         updateKbHeaderBadge();
         updateComposerHint();
+        setAppMode(currentAppMode);
     } catch {
         el.hidden = true;
         if (panel) panel.hidden = true;
@@ -1130,11 +1140,1014 @@ function bindKbDocsPanel() {
     });
 }
 
+// --- Audit mode ---
+let currentAppMode = localStorage.getItem(APP_MODE_STORAGE_KEY) || "chat";
+let currentAuditPolicyId = null;
+let currentAuditData = null;
+let auditUploadInProgress = false;
+let auditChatSending = false;
+let auditCompareMode = false;
+let auditCompareSelected = new Set();
+let auditCompareInProgress = false;
+let auditComparisonActive = false;
+let currentComparisonData = null;
+
+function setAppMode(mode) {
+    currentAppMode = mode === "audit" ? "audit" : "chat";
+    localStorage.setItem(APP_MODE_STORAGE_KEY, currentAppMode);
+
+    document.documentElement.classList.remove("mode-chat", "mode-audit");
+    document.documentElement.classList.add(`mode-${currentAppMode}`);
+
+    const chatPanel = document.getElementById("chat-mode-panel");
+    const auditPanel = document.getElementById("audit-mode-panel");
+    const kbPanel = document.getElementById("kb-panel");
+    const kbDocsPanel = document.getElementById("kb-docs-panel");
+    const chatHistory = document.getElementById("chat-history-section");
+    const auditHistory = document.getElementById("audit-history-section");
+    const newChatBtn = document.getElementById("new-chat-btn");
+    const summarizeBtn = document.getElementById("summarize-chat-btn");
+    const clearHistoryBtn = document.getElementById("clear-history-btn");
+    const inChat = currentAppMode === "chat";
+    const showKb = inChat && kbServerEnabled;
+
+    document.querySelectorAll(".mode-toggle-btn").forEach((btn) => {
+        const isActive = btn.dataset.mode === currentAppMode;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+
+    if (chatPanel) chatPanel.hidden = !inChat;
+    if (auditPanel) auditPanel.hidden = inChat;
+    if (kbPanel) kbPanel.hidden = !showKb;
+    if (kbDocsPanel) kbDocsPanel.hidden = !showKb;
+    if (chatHistory) chatHistory.hidden = !inChat;
+    if (auditHistory) auditHistory.hidden = inChat;
+    if (newChatBtn) newChatBtn.hidden = !inChat;
+    if (summarizeBtn) summarizeBtn.hidden = !inChat;
+    if (clearHistoryBtn) clearHistoryBtn.hidden = !inChat;
+
+    if (currentAppMode === "audit") {
+        void loadAuditPolicies();
+        const savedId = Number(localStorage.getItem(ACTIVE_AUDIT_POLICY_KEY));
+        if (savedId && currentAuditPolicyId == null) {
+            void loadAuditPolicy(savedId, { silent: true });
+        } else if (!currentAuditPolicyId) {
+            resetAuditView();
+        }
+    }
+}
+
+function updateCompareSidebarButton() {
+    const toggleBtn = document.getElementById("audit-compare-toggle-btn");
+    if (!toggleBtn) return;
+
+    toggleBtn.classList.remove("audit-compare-clear");
+    document.documentElement.classList.toggle("audit-comparison-active", auditComparisonActive);
+
+    if (auditComparisonActive) {
+        toggleBtn.textContent = "Clear Comparison";
+        toggleBtn.classList.add("audit-compare-clear");
+        return;
+    }
+    toggleBtn.textContent = auditCompareMode ? "Exit compare" : "Compare policies";
+}
+
+function setAuditCompareMode(enabled) {
+    auditCompareMode = enabled;
+    document.documentElement.classList.toggle("audit-compare-mode", enabled);
+
+    const actions = document.getElementById("audit-compare-actions");
+    const executeBtn = document.getElementById("audit-compare-execute-btn");
+
+    if (actions) actions.hidden = !enabled;
+    if (executeBtn) executeBtn.hidden = true;
+
+    if (!enabled) {
+        auditCompareSelected.clear();
+    }
+    updateAuditCompareSelectionUI();
+    updateCompareSidebarButton();
+    void loadAuditPolicies();
+}
+
+function setAuditCompareStatus(msg, type = "") {
+    const el = document.getElementById("audit-compare-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = `audit-compare-hint${type ? ` audit-compare-status-${type}` : ""}`;
+}
+
+function updateAuditCompareSelectionUI() {
+    const executeBtn = document.getElementById("audit-compare-execute-btn");
+    const count = auditCompareSelected.size;
+
+    if (executeBtn) executeBtn.hidden = count !== 2;
+    if (count === 2) {
+        setAuditCompareStatus("2 policies selected — ready to compare");
+    } else if (!auditCompareInProgress) {
+        setAuditCompareStatus(`Select exactly 2 policies (${count}/2)`);
+    }
+
+    document.querySelectorAll(".audit-compare-checkbox").forEach((box) => {
+        const id = Number(box.dataset.policyId);
+        box.checked = auditCompareSelected.has(id);
+        if (auditCompareMode && count >= 2 && !box.checked) {
+            box.disabled = true;
+        } else {
+            box.disabled = false;
+        }
+    });
+}
+
+function exitAuditCompareMode() {
+    if (auditCompareMode) setAuditCompareMode(false);
+}
+
+function resetComparisonState() {
+    auditComparisonActive = false;
+    currentComparisonData = null;
+    const winnerContent = document.getElementById("audit-comparison-winner-content");
+    const columnsEl = document.getElementById("audit-comparison-columns");
+    if (winnerContent) winnerContent.innerHTML = "";
+    if (columnsEl) columnsEl.innerHTML = "";
+    updateCompareSidebarButton();
+}
+
+function clearComparisonView() {
+    resetComparisonState();
+    hideAuditComparisonView();
+    exitAuditCompareMode();
+
+    const savedPolicyId = currentAuditPolicyId;
+    if (savedPolicyId) {
+        void loadAuditPolicy(savedPolicyId, { silent: true });
+        return;
+    }
+    resetAuditView();
+}
+
+function showAuditComparisonView() {
+    const uploadSection = document.getElementById("audit-upload-section");
+    const detail = document.getElementById("audit-detail");
+    const comparisonView = document.getElementById("audit-comparison-view");
+    const toolbar = document.getElementById("audit-toolbar");
+    const uploadAgain = document.getElementById("audit-upload-again-btn");
+    const exportGroup = document.getElementById("audit-export-group");
+
+    if (uploadSection) uploadSection.hidden = true;
+    if (detail) detail.hidden = true;
+    if (comparisonView) comparisonView.hidden = false;
+    if (toolbar) toolbar.hidden = true;
+    if (uploadAgain) uploadAgain.hidden = true;
+    if (exportGroup) exportGroup.hidden = true;
+    closeAuditSourcePanel();
+    auditComparisonActive = true;
+    updateCompareSidebarButton();
+}
+
+function hideAuditComparisonView() {
+    const comparisonView = document.getElementById("audit-comparison-view");
+    const toolbar = document.getElementById("audit-toolbar");
+    if (comparisonView) comparisonView.hidden = true;
+    if (toolbar) toolbar.hidden = false;
+}
+
+function resetAuditView() {
+    currentAuditPolicyId = null;
+    currentAuditData = null;
+    localStorage.removeItem(ACTIVE_AUDIT_POLICY_KEY);
+    closeAuditSourcePanel();
+
+    const uploadSection = document.getElementById("audit-upload-section");
+    const detail = document.getElementById("audit-detail");
+    const uploadAgain = document.getElementById("audit-upload-again-btn");
+    const exportGroup = document.getElementById("audit-export-group");
+    const downloadLink = document.getElementById("audit-download-original");
+    const thread = document.getElementById("audit-chat-thread");
+
+    if (uploadSection) uploadSection.hidden = false;
+    if (detail) detail.hidden = true;
+    if (uploadAgain) uploadAgain.hidden = true;
+    if (exportGroup) exportGroup.hidden = true;
+    if (downloadLink) downloadLink.hidden = true;
+    if (thread) thread.innerHTML = "";
+    const banner = document.getElementById("audit-recommendation-banner");
+    if (banner) banner.hidden = true;
+    resetComparisonState();
+    hideAuditComparisonView();
+    exitAuditCompareMode();
+    setAuditUploadStatus("");
+    setAuditDropzoneBusy(false);
+
+    document.querySelectorAll(".audit-history-item").forEach((btn) => {
+        btn.classList.remove("active");
+    });
+}
+
+function showAuditDetailView() {
+    const uploadSection = document.getElementById("audit-upload-section");
+    const detail = document.getElementById("audit-detail");
+    const uploadAgain = document.getElementById("audit-upload-again-btn");
+    const exportGroup = document.getElementById("audit-export-group");
+    const downloadLink = document.getElementById("audit-download-original");
+    const toolbar = document.getElementById("audit-toolbar");
+
+    if (auditComparisonActive) resetComparisonState();
+    hideAuditComparisonView();
+    if (toolbar) toolbar.hidden = false;
+    if (uploadSection) uploadSection.hidden = true;
+    if (detail) detail.hidden = false;
+    if (uploadAgain) uploadAgain.hidden = false;
+    if (exportGroup) exportGroup.hidden = false;
+    if (downloadLink && currentAuditPolicyId) {
+        downloadLink.href = `${API_BASE}/api/audit/policies/${currentAuditPolicyId}/file`;
+        downloadLink.hidden = false;
+    }
+}
+
+function bindModeToggle() {
+    const toggle = document.getElementById("mode-toggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", (e) => {
+        const btn = e.target.closest(".mode-toggle-btn");
+        if (!btn?.dataset.mode) return;
+        setAppMode(btn.dataset.mode);
+    });
+}
+
+function metricBadgeClass(metric, value) {
+    if (metric === "ped_waiting_period_months") {
+        if (value == null) return "warn";
+        if (value <= 24) return "good";
+        if (value >= 36) return "bad";
+        return "warn";
+    }
+    if (metric === "co_payment_percentage") {
+        if (value == null || value === 0) return "good";
+        if (value > 10) return "bad";
+        return "warn";
+    }
+    if (metric === "room_rent_cap") {
+        const lower = String(value || "").toLowerCase();
+        if (
+            lower.includes("no cap")
+            || lower.includes("no limit")
+            || lower.includes("no sub-limit")
+            || lower.includes("no sub limit")
+            || lower.includes("no sub-limits")
+            || lower.includes("no sub limits")
+        ) {
+            return "good";
+        }
+        if (lower === "unknown" || !value) return "warn";
+        if (lower.includes("single") || lower.includes("cap") || lower.includes("limit")) return "bad";
+        return "warn";
+    }
+    if (metric === "restoration_benefit") {
+        const lower = String(value || "").toLowerCase();
+        if (lower.includes("not mentioned") || !value) return "bad";
+        if (lower.includes("partial") || lower.includes("limited")) return "warn";
+        return "good";
+    }
+    return "warn";
+}
+
+const METRIC_LABELS = {
+    ped_waiting_period_months: "PED waiting period",
+    room_rent_cap: "Room rent cap",
+    co_payment_percentage: "Co-payment",
+    restoration_benefit: "Restoration benefit",
+};
+
+function openAuditSourcePanel(sourceKey, labelOverride) {
+    if (!currentAuditData || !currentAuditPolicyId) return;
+
+    const panel = document.getElementById("audit-source-panel");
+    const backdrop = document.getElementById("audit-source-backdrop");
+    const metricLabel = document.getElementById("audit-source-metric-label");
+    const pageLabel = document.getElementById("audit-source-page-label");
+    const excerptEl = document.getElementById("audit-source-excerpt");
+    const noteEl = document.getElementById("audit-source-note");
+
+    const sources = currentAuditData.sources || {};
+    let source = sources[sourceKey];
+
+    const showSource = (src) => {
+        if (metricLabel) {
+            metricLabel.textContent = labelOverride || METRIC_LABELS[sourceKey] || sourceKey.replace(/_/g, " ");
+        }
+        if (pageLabel) {
+            pageLabel.textContent = src.page ? `Page ${src.page}` : "Page unknown";
+        }
+        if (excerptEl) excerptEl.textContent = src.excerpt || "";
+        if (noteEl) {
+            if (src.approximate) {
+                noteEl.hidden = false;
+                noteEl.textContent = "Approximate match from document text (re-audit for exact citation).";
+            } else {
+                noteEl.hidden = true;
+                noteEl.textContent = "";
+            }
+        }
+        if (panel) {
+            panel.hidden = false;
+            panel.classList.add("open");
+        }
+        if (backdrop) backdrop.hidden = false;
+    };
+
+    if (source) {
+        showSource(source);
+        return;
+    }
+
+    fetch(`${API_BASE}/api/audit/policies/${currentAuditPolicyId}/source/${encodeURIComponent(sourceKey)}`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Source not found"))))
+        .then((src) => {
+            if (!currentAuditData.sources) currentAuditData.sources = {};
+            currentAuditData.sources[sourceKey] = src;
+            showSource(src);
+        })
+        .catch(() => {
+            if (metricLabel) metricLabel.textContent = labelOverride || sourceKey;
+            if (pageLabel) pageLabel.textContent = "";
+            if (excerptEl) excerptEl.textContent = "No source excerpt found for this item.";
+            if (noteEl) noteEl.hidden = true;
+            if (panel) {
+                panel.hidden = false;
+                panel.classList.add("open");
+            }
+            if (backdrop) backdrop.hidden = false;
+        });
+}
+
+function closeAuditSourcePanel() {
+    const panel = document.getElementById("audit-source-panel");
+    const backdrop = document.getElementById("audit-source-backdrop");
+    if (panel) {
+        panel.classList.remove("open");
+        panel.hidden = true;
+    }
+    if (backdrop) backdrop.hidden = true;
+}
+
+function bindAuditSourcePanel() {
+    document.getElementById("audit-source-close")?.addEventListener("click", closeAuditSourcePanel);
+    document.getElementById("audit-source-backdrop")?.addEventListener("click", closeAuditSourcePanel);
+}
+
+function buildAuditScorecardHtml(metrics, sources, { interactive = true } = {}) {
+    if (!metrics) return "";
+
+    const items = [
+        { key: "ped_waiting_period_months", format: (v) => (v != null ? `${v} months` : "Unknown") },
+        { key: "room_rent_cap", format: (v) => v || "Unknown" },
+        { key: "co_payment_percentage", format: (v) => (v != null ? `${v}%` : "None stated") },
+        { key: "restoration_benefit", format: (v) => v || "Not mentioned" },
+    ];
+
+    return items.map(({ key, format }) => {
+        const value = metrics[key];
+        const cls = metricBadgeClass(key, value);
+        const hasSource = sources && sources[key];
+        const tag = interactive ? "button" : "div";
+        const typeAttr = interactive ? ' type="button"' : "";
+        const titleAttr = interactive ? ' title="View source in document"' : "";
+        const sourceLink = interactive
+            ? `<span class="metric-source-link">${hasSource ? "View source" : "Find source"}</span>`
+            : "";
+        return `<${tag}${typeAttr} class="audit-metric-badge ${cls}" data-metric-key="${escapeHtml(key)}"${titleAttr}>
+            <span class="metric-label">${escapeHtml(METRIC_LABELS[key])}</span>
+            <span class="metric-value">${escapeHtml(format(value))}</span>
+            ${sourceLink}
+        </${tag}>`;
+    }).join("");
+}
+
+function renderAuditScorecard(metrics, sources) {
+    const scorecard = document.getElementById("audit-scorecard");
+    if (!scorecard || !metrics) return;
+
+    scorecard.innerHTML = buildAuditScorecardHtml(metrics, sources, { interactive: true });
+
+    scorecard.querySelectorAll(".audit-metric-badge").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const key = btn.dataset.metricKey;
+            if (key) openAuditSourcePanel(key);
+        });
+    });
+}
+
+function renderAuditLists(risks, strengths, sources) {
+    const risksEl = document.getElementById("audit-risks");
+    const strengthsEl = document.getElementById("audit-strengths");
+
+    if (risksEl) {
+        if (!risks.length) {
+            risksEl.className = "audit-lists risks";
+            risksEl.innerHTML = "";
+        } else {
+            risksEl.className = "audit-lists risks";
+            risksEl.innerHTML = `<li class="list-heading"><strong>Risks</strong></li>${risks
+                .map(
+                    (r, i) =>
+                        `<li class="audit-source-item" data-source-key="risk_${i}" tabindex="0" role="button">${escapeHtml(r)}</li>`,
+                )
+                .join("")}`;
+        }
+    }
+
+    if (strengthsEl) {
+        if (!strengths.length) {
+            strengthsEl.className = "audit-lists strengths";
+            strengthsEl.innerHTML = "";
+        } else {
+            strengthsEl.className = "audit-lists strengths";
+            strengthsEl.innerHTML = `<li class="list-heading"><strong>Strengths</strong></li>${strengths
+                .map(
+                    (s, i) =>
+                        `<li class="audit-source-item" data-source-key="strength_${i}" tabindex="0" role="button">${escapeHtml(s)}</li>`,
+                )
+                .join("")}`;
+        }
+    }
+
+    document.querySelectorAll(".audit-source-item").forEach((el) => {
+        const open = () => openAuditSourcePanel(el.dataset.sourceKey, el.textContent.trim());
+        el.addEventListener("click", open);
+        el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                open();
+            }
+        });
+    });
+}
+
+function auditRecommendationHeadline(label) {
+    const headlines = {
+        BUY: "RECOMMENDATION: BUY (Highly Cost-Effective)",
+        REVIEW: "RECOMMENDATION: PROCEED WITH CAUTION (Review Restrictions)",
+        PASS: "RECOMMENDATION: PASS (High Out-of-Pocket Risks)",
+    };
+    return headlines[label] || headlines.REVIEW;
+}
+
+function renderAuditRecommendationBanner(data) {
+    const banner = document.getElementById("audit-recommendation-banner");
+    const headlineEl = document.getElementById("audit-recommendation-headline");
+    const verdictEl = document.getElementById("audit-recommendation-verdict");
+    const missingEl = document.getElementById("audit-recommendation-missing");
+    if (!banner || !headlineEl || !verdictEl || !missingEl) return;
+
+    const labelRaw = (data.verdict_label || "REVIEW").toUpperCase();
+    const labelClass = labelRaw.toLowerCase();
+    const headline = data.recommendation_headline || auditRecommendationHeadline(labelRaw);
+    const verdictLine = data.verdict
+        || (data.recommendation_summary ? data.recommendation_summary.split(".")[0].trim() : "")
+        || "No verdict available for this policy.";
+    const whatsMissing = (data.whats_missing || "").trim();
+
+    headlineEl.textContent = headline;
+    verdictEl.textContent = verdictLine.endsWith(".") ? verdictLine.slice(0, -1) : verdictLine;
+    missingEl.textContent = whatsMissing;
+
+    banner.className = `audit-recommendation-banner ${labelClass}${whatsMissing ? "" : " no-missing"}`;
+    banner.hidden = false;
+}
+
+function renderAuditResults(data) {
+    const results = document.getElementById("audit-results");
+    const filenameEl = document.getElementById("audit-filename");
+    const badgeEl = document.getElementById("audit-verdict-badge");
+    const verdictText = document.getElementById("audit-verdict-text");
+
+    if (!results) return;
+
+    currentAuditPolicyId = data.policy_id;
+    currentAuditData = data;
+    if (data.policy_id) {
+        localStorage.setItem(ACTIVE_AUDIT_POLICY_KEY, String(data.policy_id));
+    }
+
+    if (filenameEl) filenameEl.textContent = data.filename || "Uploaded policy";
+    if (badgeEl) {
+        const labelRaw = (data.verdict_label || "REVIEW").toUpperCase();
+        badgeEl.textContent = labelRaw;
+        badgeEl.className = `audit-verdict-badge ${labelRaw.toLowerCase()}`;
+        badgeEl.hidden = false;
+    }
+    if (verdictText) {
+        const summary = data.recommendation_summary || data.verdict || "No verdict text available for this policy.";
+        verdictText.textContent = summary;
+    }
+    renderAuditRecommendationBanner(data);
+    renderAuditScorecard(data.metrics, data.sources);
+    renderAuditLists(data.key_risks || [], data.key_strengths || [], data.sources);
+
+    showAuditDetailView();
+    const thread = document.getElementById("audit-chat-thread");
+    if (thread) thread.innerHTML = "";
+    void loadAuditPolicies();
+}
+
+function setAuditUploadStatus(msg, type = "") {
+    const el = document.getElementById("audit-upload-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = `audit-upload-status${type ? ` ${type}` : ""}`;
+}
+
+function setAuditDropzoneBusy(busy) {
+    const dz = document.getElementById("audit-dropzone");
+    if (!dz) return;
+    dz.classList.toggle("audit-dropzone-busy", busy);
+    dz.classList.toggle("kb-dropzone-busy", busy);
+}
+
+async function uploadAuditPolicy(file) {
+    if (auditUploadInProgress || !file) return;
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+        setAuditUploadStatus("Only PDF files are supported.", "error");
+        return;
+    }
+
+    auditUploadInProgress = true;
+    setAuditDropzoneBusy(true);
+    setAuditUploadStatus("Extracting metrics from policy…");
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+        const response = await fetch(`${API_BASE}/api/audit/upload`, {
+            method: "POST",
+            body: formData,
+        });
+        if (!response.ok) {
+            let detail = response.statusText;
+            try {
+                const err = await response.json();
+                detail = err.detail || detail;
+            } catch { /* ignore */ }
+            throw new Error(detail);
+        }
+        setAuditUploadStatus("Generating strategic verdict…");
+        const data = await response.json();
+        renderAuditResults(data);
+        setAuditUploadStatus("Audit complete.", "ok");
+    } catch (err) {
+        setAuditUploadStatus(err.message || "Audit failed", "error");
+    } finally {
+        auditUploadInProgress = false;
+        setAuditDropzoneBusy(false);
+        const input = document.getElementById("audit-file-input");
+        if (input) input.value = "";
+    }
+}
+
+async function loadAuditPolicy(policyId, options = {}) {
+    try {
+        const response = await fetch(`${API_BASE}/api/audit/policies/${policyId}`);
+        if (!response.ok) throw new Error("Could not load policy");
+        const data = await response.json();
+        renderAuditResults(data);
+    } catch (err) {
+        if (!options.silent) {
+            setAuditUploadStatus(err.message, "error");
+        }
+        resetAuditView();
+    }
+}
+
+async function deleteAuditPolicy(policyId) {
+    if (!policyId) return;
+    const confirmed = window.confirm("Remove this audit from history? The stored PDF will be deleted.");
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/audit/policies/${policyId}`, {
+            method: "DELETE",
+        });
+        if (!response.ok) {
+            let detail = "Failed to remove audit";
+            try {
+                const err = await response.json();
+                detail = err.detail || detail;
+            } catch { /* ignore */ }
+            throw new Error(detail);
+        }
+
+        auditCompareSelected.delete(policyId);
+        if (auditComparisonActive) resetComparisonState();
+        if (currentAuditPolicyId === policyId) {
+            resetAuditView();
+        }
+        hideAuditComparisonView();
+        void loadAuditPolicies();
+        setAuditCompareStatus("Audit removed.", "ok");
+    } catch (err) {
+        setAuditCompareStatus(err.message || "Could not remove audit", "error");
+    }
+}
+
+async function loadAuditPolicies() {
+    const list = document.getElementById("audit-policy-list");
+    if (!list) return;
+    try {
+        const response = await fetch(`${API_BASE}/api/audit/policies`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const policies = data.policies || [];
+        if (!policies.length) {
+            list.innerHTML = '<p class="muted-text">No policies audited yet</p>';
+            return;
+        }
+        list.innerHTML = policies.map((p) => {
+            const label = p.verdict_label || "—";
+            const active = !auditCompareMode && p.policy_id === currentAuditPolicyId ? " active" : "";
+            const checked = auditCompareSelected.has(p.policy_id) ? " checked" : "";
+            return `<div class="audit-history-row">
+                <input type="checkbox" class="audit-compare-checkbox" data-policy-id="${p.policy_id}"${checked} aria-label="Select ${escapeHtml(p.filename)} for comparison">
+                <button type="button" class="audit-history-item${active}" data-policy-id="${p.policy_id}">${escapeHtml(p.filename)} <span class="muted-text">· ${escapeHtml(label)}</span></button>
+                <button type="button" class="audit-history-delete" data-policy-id="${p.policy_id}" title="Remove audit" aria-label="Remove ${escapeHtml(p.filename)}">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>`;
+        }).join("");
+
+        list.querySelectorAll(".audit-compare-checkbox").forEach((box) => {
+            box.addEventListener("change", () => {
+                const id = Number(box.dataset.policyId);
+                if (!id) return;
+                if (box.checked) {
+                    if (auditCompareSelected.size >= 2) {
+                        const first = auditCompareSelected.values().next().value;
+                        auditCompareSelected.delete(first);
+                    }
+                    auditCompareSelected.add(id);
+                } else {
+                    auditCompareSelected.delete(id);
+                }
+                updateAuditCompareSelectionUI();
+            });
+        });
+
+        list.querySelectorAll(".audit-history-item").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                if (auditCompareMode) {
+                    const row = btn.closest(".audit-history-row");
+                    const box = row?.querySelector(".audit-compare-checkbox");
+                    if (box) {
+                        box.checked = !box.checked;
+                        box.dispatchEvent(new Event("change"));
+                    }
+                    return;
+                }
+                const id = Number(btn.dataset.policyId);
+                if (id) void loadAuditPolicy(id);
+            });
+        });
+
+        list.querySelectorAll(".audit-history-delete").forEach((btn) => {
+            btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const id = Number(btn.dataset.policyId);
+                if (id) void deleteAuditPolicy(id);
+            });
+        });
+
+        updateAuditCompareSelectionUI();
+    } catch { /* ignore */ }
+}
+
+function renderCompareBreakdown(policy, sideLabel) {
+    const risks = policy.key_risks || [];
+    const strengths = policy.key_strengths || [];
+    const panelId = `compare-breakdown-${sideLabel}`;
+
+    const riskItems = risks.length
+        ? `<ul class="audit-comparison-list audit-comparison-list-risks">${risks
+              .map((r) => `<li>${escapeHtml(r)}</li>`)
+              .join("")}</ul>`
+        : "";
+    const strengthItems = strengths.length
+        ? `<ul class="audit-comparison-list audit-comparison-list-strengths">${strengths
+              .map((s) => `<li>${escapeHtml(s)}</li>`)
+              .join("")}</ul>`
+        : "";
+    const emptyNote =
+        !risks.length && !strengths.length
+            ? '<p class="muted-text audit-comparison-breakdown-empty">No detailed risks or strengths recorded.</p>'
+            : "";
+
+    return `
+        <div class="audit-comparison-breakdown">
+            <button type="button" class="audit-comparison-breakdown-toggle" aria-expanded="false" aria-controls="${panelId}">
+                <span>Detailed breakdown</span>
+                <svg class="audit-comparison-breakdown-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div id="${panelId}" class="audit-comparison-breakdown-panel" hidden>
+                <div class="audit-comparison-breakdown-scroll">
+                    ${riskItems ? `<h5 class="audit-comparison-list-heading">Risks</h5>${riskItems}` : ""}
+                    ${strengthItems ? `<h5 class="audit-comparison-list-heading">Strengths</h5>${strengthItems}` : ""}
+                    ${emptyNote}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function bindComparisonBreakdowns(container) {
+    if (!container) return;
+    container.querySelectorAll(".audit-comparison-breakdown-toggle").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const panelId = btn.getAttribute("aria-controls");
+            const panel = panelId ? document.getElementById(panelId) : null;
+            const expanded = btn.getAttribute("aria-expanded") === "true";
+            const nextExpanded = !expanded;
+            btn.setAttribute("aria-expanded", nextExpanded ? "true" : "false");
+            btn.classList.toggle("is-open", nextExpanded);
+            if (panel) panel.hidden = !nextExpanded;
+        });
+    });
+}
+
+function renderCompareColumn(policy, sideLabel, isWinner) {
+    const label = (policy.verdict_label || "REVIEW").toUpperCase();
+    const badgeClass = label.toLowerCase();
+    const tagClass = isWinner ? "winner-tag" : "loser-tag";
+    const tagText = isWinner ? "Winner" : "Eliminated";
+    return `
+        <div class="audit-comparison-col-head">
+            <h3>Policy ${sideLabel}: ${escapeHtml(policy.filename || "Policy")}</h3>
+            <span class="audit-comparison-col-tag ${tagClass}">${tagText}</span>
+        </div>
+        <div class="audit-comparison-col-body">
+            <span class="audit-verdict-badge ${badgeClass}">${escapeHtml(label)}</span>
+            <div class="audit-comparison-scorecard audit-scorecard">
+                ${buildAuditScorecardHtml(policy.metrics, policy.sources, { interactive: false })}
+            </div>
+            ${renderCompareBreakdown(policy, sideLabel)}
+        </div>
+    `;
+}
+
+function renderComparisonResults(data) {
+    const winnerEl = document.getElementById("audit-comparison-winner-content");
+    const columnsEl = document.getElementById("audit-comparison-columns");
+    if (!winnerEl || !columnsEl || !data) return;
+
+    currentComparisonData = data;
+
+    winnerEl.innerHTML = `
+        <p class="audit-comparison-winner-label">Auditor's verdict — winner</p>
+        <h2 class="audit-comparison-winner-name">${escapeHtml(data.winner_filename || "Selected policy")}</h2>
+        <p class="audit-comparison-justification"><strong>Elimination justification:</strong> ${escapeHtml(data.elimination_justification || "")}</p>
+    `;
+
+    const winnerSide = (data.winner || "A").toUpperCase();
+    columnsEl.innerHTML = `
+        <div class="audit-comparison-col ${winnerSide === "A" ? "is-winner" : "is-loser"}">
+            ${renderCompareColumn(data.policy_a, "A", winnerSide === "A")}
+        </div>
+        <div class="audit-comparison-col ${winnerSide === "B" ? "is-winner" : "is-loser"}">
+            ${renderCompareColumn(data.policy_b, "B", winnerSide === "B")}
+        </div>
+    `;
+
+    bindComparisonBreakdowns(columnsEl);
+}
+
+async function executeAuditComparison() {
+    if (auditCompareInProgress || auditCompareSelected.size !== 2) return;
+
+    const ids = Array.from(auditCompareSelected);
+    auditCompareInProgress = true;
+    const executeBtn = document.getElementById("audit-compare-execute-btn");
+    if (executeBtn) executeBtn.disabled = true;
+    setAuditCompareStatus("Running head-to-head comparison…", "busy");
+
+    try {
+        const params = new URLSearchParams({ policy_a: String(ids[0]), policy_b: String(ids[1]) });
+        const response = await fetch(`${API_BASE}/api/compare?${params}`);
+        if (!response.ok) {
+            let detail = response.statusText;
+            try {
+                const err = await response.json();
+                detail = err.detail || detail;
+                if (Array.isArray(detail)) {
+                    detail = detail.map((item) => item.msg || JSON.stringify(item)).join(", ");
+                }
+            } catch { /* ignore */ }
+            throw new Error(typeof detail === "string" ? detail : "Comparison failed");
+        }
+        const data = await response.json();
+        renderComparisonResults(data);
+        exitAuditCompareMode();
+        showAuditComparisonView();
+        setAuditCompareStatus("Comparison complete.", "ok");
+    } catch (err) {
+        setAuditCompareStatus(err.message || "Comparison failed", "error");
+    } finally {
+        auditCompareInProgress = false;
+        if (executeBtn) executeBtn.disabled = false;
+    }
+}
+
+function appendAuditChatMessage(role, text) {
+    const thread = document.getElementById("audit-chat-thread");
+    if (!thread) return;
+    const msg = document.createElement("div");
+    msg.className = `audit-chat-msg ${role}`;
+    msg.textContent = role === "assistant" ? formatAssistantText(text) : text;
+    thread.appendChild(msg);
+    thread.scrollTop = thread.scrollHeight;
+    return msg;
+}
+
+async function sendAuditFollowUp(rawText) {
+    if (auditChatSending || !currentAuditPolicyId) return;
+    const message = rawText.trim();
+    if (!message) return;
+
+    auditChatSending = true;
+    const inputEl = document.getElementById("audit-followup-input");
+    const sendEl = document.getElementById("audit-followup-send");
+    if (inputEl) inputEl.disabled = true;
+    if (sendEl) sendEl.disabled = true;
+
+    appendAuditChatMessage("user", message);
+    if (inputEl) inputEl.value = "";
+    const typing = appendAuditChatMessage("assistant", "Thinking…");
+
+    try {
+        const response = await fetch(`${API_BASE}/api/audit/policies/${currentAuditPolicyId}/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message, stream: true }),
+        });
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.detail || `Server returned ${response.status}`);
+        }
+
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("text/event-stream") && response.body) {
+            typing.textContent = "";
+            let fullReply = "";
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+
+                for (const line of lines) {
+                    if (!line.startsWith("data: ")) continue;
+                    let payload;
+                    try {
+                        payload = JSON.parse(line.slice(6));
+                    } catch {
+                        continue;
+                    }
+                    if (payload.type === "token" && payload.content) {
+                        fullReply += payload.content;
+                        typing.textContent = formatAssistantText(fullReply);
+                    } else if (payload.type === "error") {
+                        throw new Error(payload.detail || "Stream failed");
+                    } else if (payload.type === "done") {
+                        fullReply = payload.reply || fullReply;
+                    }
+                }
+            }
+            typing.textContent = formatAssistantText(fullReply) || "No response.";
+        } else {
+            const data = await response.json();
+            typing.textContent = formatAssistantText(data.reply || "");
+        }
+    } catch (err) {
+        typing.textContent = `Error: ${err.message}`;
+        typing.classList.add("error");
+    } finally {
+        auditChatSending = false;
+        if (inputEl) inputEl.disabled = false;
+        if (sendEl) sendEl.disabled = false;
+    }
+}
+
+function downloadAuditReport(format) {
+    if (!currentAuditPolicyId) return;
+    window.location.href = `${API_BASE}/api/audit/policies/${currentAuditPolicyId}/export?format=${format}`;
+}
+
+function bindAuditPanel() {
+    const dropzone = document.getElementById("audit-dropzone");
+    const fileInput = document.getElementById("audit-file-input");
+    const followupInput = document.getElementById("audit-followup-input");
+    const followupSend = document.getElementById("audit-followup-send");
+    const newAuditBtn = document.getElementById("new-audit-btn");
+    const uploadAgainBtn = document.getElementById("audit-upload-again-btn");
+    const exportMdBtn = document.getElementById("audit-export-md-btn");
+    const exportPdfBtn = document.getElementById("audit-export-pdf-btn");
+    const downloadOriginal = document.getElementById("audit-download-original");
+    const compareToggleBtn = document.getElementById("audit-compare-toggle-btn");
+    const compareExecuteBtn = document.getElementById("audit-compare-execute-btn");
+    const compareCancelBtn = document.getElementById("audit-compare-cancel-btn");
+    const comparisonBackBtn = document.getElementById("audit-comparison-back-btn");
+
+    const openUpload = () => {
+        resetAuditView();
+        if (fileInput) fileInput.click();
+    };
+
+    if (newAuditBtn) {
+        newAuditBtn.addEventListener("click", () => resetAuditView());
+    }
+    if (uploadAgainBtn) {
+        uploadAgainBtn.addEventListener("click", openUpload);
+    }
+    if (exportMdBtn) {
+        exportMdBtn.addEventListener("click", () => downloadAuditReport("markdown"));
+    }
+    if (exportPdfBtn) {
+        exportPdfBtn.addEventListener("click", () => downloadAuditReport("pdf"));
+    }
+    if (downloadOriginal) {
+        downloadOriginal.addEventListener("click", (e) => {
+            if (!currentAuditPolicyId) e.preventDefault();
+        });
+    }
+    if (compareToggleBtn) {
+        compareToggleBtn.addEventListener("click", () => {
+            if (auditComparisonActive) {
+                clearComparisonView();
+                return;
+            }
+            setAuditCompareMode(!auditCompareMode);
+        });
+    }
+    if (compareCancelBtn) {
+        compareCancelBtn.addEventListener("click", () => exitAuditCompareMode());
+    }
+    if (compareExecuteBtn) {
+        compareExecuteBtn.addEventListener("click", () => void executeAuditComparison());
+    }
+    if (comparisonBackBtn) {
+        comparisonBackBtn.addEventListener("click", () => clearComparisonView());
+    }
+    document.getElementById("audit-comparison-close-btn")?.addEventListener("click", () => clearComparisonView());
+
+    bindAuditSourcePanel();
+
+    if (dropzone && fileInput) {
+        dropzone.addEventListener("click", (e) => {
+            if (auditUploadInProgress) return;
+            e.preventDefault();
+            fileInput.click();
+        });
+        dropzone.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            if (!auditUploadInProgress) dropzone.classList.add("kb-dropzone-active");
+        });
+        dropzone.addEventListener("dragleave", () => dropzone.classList.remove("kb-dropzone-active"));
+        dropzone.addEventListener("drop", (e) => {
+            e.preventDefault();
+            dropzone.classList.remove("kb-dropzone-active");
+            if (auditUploadInProgress) return;
+            const file = e.dataTransfer?.files?.[0];
+            if (file) void uploadAuditPolicy(file);
+        });
+        fileInput.addEventListener("change", () => {
+            const file = fileInput.files?.[0];
+            if (file) void uploadAuditPolicy(file);
+        });
+    }
+
+    if (followupSend && followupInput) {
+        followupSend.addEventListener("click", () => void sendAuditFollowUp(followupInput.value));
+        followupInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void sendAuditFollowUp(followupInput.value);
+            }
+        });
+    }
+}
+
 initTheme();
 autoResizeInput();
 initializeChatBox();
 bindKbToggle();
 bindKbDocsPanel();
+bindModeToggle();
+bindAuditPanel();
+setAppMode(currentAppMode);
 void loadKbStatus();
 
 loadConversations().then((conversations) => {

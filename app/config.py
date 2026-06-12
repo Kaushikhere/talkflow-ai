@@ -8,6 +8,7 @@ load_dotenv(override=True)
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "talkflow.db"
 UPLOADS_DIR = BASE_DIR / "uploads"
+AUDIT_UPLOADS_DIR = BASE_DIR / "uploads" / "audit"
 
 OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "30"))
 GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
@@ -92,3 +93,14 @@ KB_CMS_ORIGIN = os.getenv(
     "KB_CMS_ORIGIN",
     "https://cms.careinsurance.com",
 ).rstrip("/")
+
+AUDIT_EXTRACTION_MODEL = os.getenv(
+    "AUDIT_EXTRACTION_MODEL",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+)
+AUDIT_ANALYSIS_MODEL = os.getenv("AUDIT_ANALYSIS_MODEL", "openai/gpt-oss-20b")
+AUDIT_CHAT_MODEL = os.getenv("AUDIT_CHAT_MODEL", GROQ_CHAT_MODEL)
+AUDIT_MAX_TOKENS_EXTRACT = int(os.getenv("AUDIT_MAX_TOKENS_EXTRACT", "1024"))
+AUDIT_MAX_TOKENS_VERDICT = int(os.getenv("AUDIT_MAX_TOKENS_VERDICT", "768"))
+AUDIT_MAX_TOKENS_COMPARE = int(os.getenv("AUDIT_MAX_TOKENS_COMPARE", "2048"))
+AUDIT_CONTEXT_CHARS = int(os.getenv("AUDIT_CONTEXT_CHARS", "12000"))

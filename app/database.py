@@ -1,7 +1,16 @@
+import logging
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
-from app.config import CHROMA_PATH, DB_PATH, KB_DATA_DIR, KB_EXTERNAL_DIR, UPLOADS_DIR
+from app.config import (
+    AUDIT_UPLOADS_DIR,
+    CHROMA_PATH,
+    DB_PATH,
+    KB_DATA_DIR,
+    KB_EXTERNAL_DIR,
+    UPLOADS_DIR,
+)
 
 
 def utc_now() -> str:
@@ -19,6 +28,7 @@ def get_db_connection() -> sqlite3.Connection:
 
 def initialize_storage() -> None:
     UPLOADS_DIR.mkdir(exist_ok=True)
+    AUDIT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     KB_DATA_DIR.mkdir(parents=True, exist_ok=True)
     KB_EXTERNAL_DIR.mkdir(parents=True, exist_ok=True)
     CHROMA_PATH.mkdir(parents=True, exist_ok=True)
@@ -116,6 +126,25 @@ def initialize_database() -> None:
             documents_added INTEGER DEFAULT 0,
             chunks_added INTEGER DEFAULT 0,
             error_message TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uploaded_policies (
+            policy_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            room_rent_cap TEXT,
+            ped_waiting_period_months INTEGER,
+            co_payment_percentage INTEGER,
+            restoration_benefit TEXT,
+            raw_extracted_json TEXT NOT NULL,
+            extracted_text TEXT,
+            ai_verdict TEXT,
+            verdict_label TEXT,
+            uploaded_at TEXT NOT NULL
         )
         """
     )
@@ -685,3 +714,140 @@ def finish_kb_ingest_run(
     )
     conn.commit()
     conn.close()
+
+
+# -------------------------
+# Audit policy functions
+# -------------------------
+
+
+def insert_uploaded_policy(
+    *,
+    filename: str,
+    stored_path: str,
+    room_rent_cap: str | None,
+    ped_waiting_period_months: int | None,
+    co_payment_percentage: int | None,
+    restoration_benefit: str | None,
+    raw_extracted_json: str,
+    extracted_text: str | None,
+    ai_verdict: str | None,
+    verdict_label: str | None,
+) -> int:
+    conn = get_db_connection()
+    cursor = conn.execute(
+        """
+        INSERT INTO uploaded_policies (
+            filename, stored_path, room_rent_cap, ped_waiting_period_months,
+            co_payment_percentage, restoration_benefit, raw_extracted_json,
+            extracted_text, ai_verdict, verdict_label, uploaded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            filename,
+            stored_path,
+            room_rent_cap,
+            ped_waiting_period_months,
+            co_payment_percentage,
+            restoration_benefit,
+            raw_extracted_json,
+            extracted_text,
+            ai_verdict,
+            verdict_label,
+            utc_now(),
+        ),
+    )
+    conn.commit()
+    policy_id = cursor.lastrowid
+    conn.close()
+    return policy_id
+
+
+def get_uploaded_policy(policy_id: int) -> dict | None:
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT * FROM uploaded_policies WHERE policy_id = ?",
+        (policy_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_uploaded_policies(*, limit: int = 20) -> list[dict]:
+    conn = get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT policy_id, filename, verdict_label, uploaded_at
+        FROM uploaded_policies
+        ORDER BY policy_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+logger = logging.getLogger(__name__)
+
+
+def delete_uploaded_policy(policy_id: int) -> bool:
+    """Delete an audited policy row and its stored PDF if present."""
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT stored_path FROM uploaded_policies WHERE policy_id = ?",
+        (policy_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    conn.execute("DELETE FROM uploaded_policies WHERE policy_id = ?", (policy_id,))
+    conn.commit()
+    conn.close()
+
+    stored_path = row["stored_path"]
+    if stored_path:
+        try:
+            pdf_path = Path(stored_path)
+            audit_root = AUDIT_UPLOADS_DIR.resolve()
+            pdf_path.resolve().relative_to(audit_root)
+            if pdf_path.is_file():
+                pdf_path.unlink()
+        except (ValueError, OSError) as exc:
+            logger.warning("Could not delete audit PDF for policy %s: %s", policy_id, exc)
+
+    return True
+
+
+logger = logging.getLogger(__name__)
+
+
+def delete_uploaded_policy(policy_id: int) -> bool:
+    """Delete an audited policy row and its stored PDF if present."""
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT stored_path FROM uploaded_policies WHERE policy_id = ?",
+        (policy_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    conn.execute("DELETE FROM uploaded_policies WHERE policy_id = ?", (policy_id,))
+    conn.commit()
+    conn.close()
+
+    stored_path = row["stored_path"]
+    if stored_path:
+        try:
+            pdf_path = Path(stored_path)
+            audit_root = AUDIT_UPLOADS_DIR.resolve()
+            pdf_path.resolve().relative_to(audit_root)
+            if pdf_path.is_file():
+                pdf_path.unlink()
+        except (ValueError, OSError) as exc:
+            logger.warning("Could not delete audit PDF for policy %s: %s", policy_id, exc)
+
+    return True
