@@ -214,8 +214,9 @@
                     <section id="audit-upload-section" class="audit-upload-section">
                         <div class="audit-intro">
                             <h2>Policy Evaluator</h2>
-                            <p>Upload any third-party health insurance policy PDF. We extract key metrics and deliver an objective Buy / Pass / Review verdict.</p>
+                            <p>Upload a health insurance policy PDF. We read the pincode and policy address, resolve the location with India Post, and let the analysis model estimate local hospital costs and tier for that place.</p>
                         </div>
+                        <p class="audit-profile-hint muted-text">Works nationwide: metros, Tier-2 cities, and Tier-3 towns/villages are classified from pincode + post-office data (₹1,500–₹8,000/day room benchmarks).</p>
                         <input id="audit-file-input" type="file" accept=".pdf,application/pdf" hidden>
                         <div id="audit-dropzone" class="kb-dropzone audit-dropzone" role="button" aria-label="Upload policy PDF for audit">
                             <span class="kb-dropzone-spinner audit-dropzone-spinner" aria-hidden="true"></span>
@@ -282,6 +283,6 @@
         </main>
     </div>
 
-    <script src="/frontend/script.js?v=26"></script>
+    <script src="/frontend/script.js?v=32"></script>
 </body>
 </html>

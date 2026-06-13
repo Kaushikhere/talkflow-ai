@@ -1377,6 +1377,35 @@ function bindModeToggle() {
 }
 
 function metricBadgeClass(metric, value) {
+    const neutralInfo = new Set([
+        "policy_pincode",
+        "policy_city",
+        "policy_zone",
+        "policy_tier",
+        "sum_insured_amount",
+    ]);
+    if (neutralInfo.has(metric)) return "neutral";
+
+    if (metric === "consumables_excluded") {
+        if (value === true) return "bad";
+        if (value === false) return "good";
+        return "warn";
+    }
+
+    if (metric === "zonal_co_pay") {
+        const lower = String(value || "").toLowerCase();
+        if (!value || lower === "unknown" || lower === "none" || lower === "not stated") return "warn";
+        if (/\b(15|20|25|30)\s*%/.test(lower) || lower.includes("tier 1") || lower.includes("metro")) {
+            return "bad";
+        }
+        if (/\b(5|10)\s*%/.test(lower)) return "warn";
+        return "neutral";
+    }
+
+    if (metric === "room_rent_cap_daily_inr") {
+        return value == null ? "warn" : "warn";
+    }
+
     if (metric === "ped_waiting_period_months") {
         if (value == null) return "warn";
         if (value <= 24) return "good";
@@ -1401,8 +1430,13 @@ function metricBadgeClass(metric, value) {
             return "good";
         }
         if (lower === "unknown" || !value) return "warn";
-        if (lower.includes("single") || lower.includes("cap") || lower.includes("limit")) return "bad";
-        return "warn";
+        if (/\d+\s*%/.test(lower) || lower.includes("limited") || lower.includes("maximum")) {
+            return "bad";
+        }
+        if (lower.includes("single") || lower.includes("cap") || lower.includes("sub-limit")) {
+            return "warn";
+        }
+        return "neutral";
     }
     if (metric === "restoration_benefit") {
         const lower = String(value || "").toLowerCase();
@@ -1414,10 +1448,18 @@ function metricBadgeClass(metric, value) {
 }
 
 const METRIC_LABELS = {
+    policy_pincode: "Policy pincode",
+    policy_city: "Policy city",
+    policy_zone: "Policy zone / geography",
+    policy_tier: "Policy tier",
+    sum_insured_amount: "Sum insured",
     ped_waiting_period_months: "PED waiting period",
     room_rent_cap: "Room rent cap",
+    room_rent_cap_daily_inr: "Room rent cap (₹/day)",
     co_payment_percentage: "Co-payment",
     restoration_benefit: "Restoration benefit",
+    consumables_excluded: "Non-medical consumables",
+    zonal_co_pay: "Zonal co-pay",
 };
 
 function openAuditSourcePanel(sourceKey, labelOverride) {
@@ -1501,10 +1543,35 @@ function buildAuditScorecardHtml(metrics, sources, { interactive = true } = {}) 
     if (!metrics) return "";
 
     const items = [
+        {
+            key: "policy_pincode",
+            format: (v) => (v != null ? String(v) : "Not stated"),
+        },
+        { key: "policy_city", format: (v) => v || "Not stated" },
+        {
+            key: "policy_zone",
+            format: (v) => (v && String(v).toLowerCase() !== "unknown" ? v : "Not stated"),
+        },
+        { key: "policy_tier", format: (v) => (v && String(v).toLowerCase() !== "unknown" ? v : "Not stated") },
+        {
+            key: "sum_insured_amount",
+            format: (v) => (v != null ? `₹${Number(v).toLocaleString("en-IN")}` : "Unknown"),
+        },
         { key: "ped_waiting_period_months", format: (v) => (v != null ? `${v} months` : "Unknown") },
         { key: "room_rent_cap", format: (v) => v || "Unknown" },
+        {
+            key: "room_rent_cap_daily_inr",
+            format: (v) => (v != null ? `₹${Number(v).toLocaleString("en-IN")}/day` : "Not stated"),
+        },
         { key: "co_payment_percentage", format: (v) => (v != null ? `${v}%` : "None stated") },
         { key: "restoration_benefit", format: (v) => v || "Not mentioned" },
+        {
+            key: "consumables_excluded",
+            format: (v) => (
+                v === true ? "Excluded" : v === false ? "Covered" : "Not stated in document"
+            ),
+        },
+        { key: "zonal_co_pay", format: (v) => v || "None stated" },
     ];
 
     return items.map(({ key, format }) => {
@@ -1539,17 +1606,37 @@ function renderAuditScorecard(metrics, sources) {
     });
 }
 
+function filterAuditGapItems(items) {
+    const placeholders = new Set([
+        "none",
+        "n/a",
+        "na",
+        "nil",
+        "not applicable",
+        "no gap",
+        "no gaps",
+        "nothing",
+    ]);
+    return (items || []).filter((item) => {
+        let text = String(item || "").trim();
+        text = text.replace(/^\[[^\]]*\]\s*/, "").replace(/^flag\s*\d+\s*:\s*/i, "").trim();
+        const normalized = text.toLowerCase().replace(/\.$/, "");
+        return normalized && !placeholders.has(normalized) && !/^none(\s+identified)?$/.test(normalized);
+    });
+}
+
 function renderAuditLists(risks, strengths, sources) {
     const risksEl = document.getElementById("audit-risks");
     const strengthsEl = document.getElementById("audit-strengths");
+    const realRisks = filterAuditGapItems(risks);
 
     if (risksEl) {
-        if (!risks.length) {
+        if (!realRisks.length) {
             risksEl.className = "audit-lists risks";
             risksEl.innerHTML = "";
         } else {
             risksEl.className = "audit-lists risks";
-            risksEl.innerHTML = `<li class="list-heading"><strong>Risks</strong></li>${risks
+            risksEl.innerHTML = `<li class="list-heading"><strong>Risks</strong></li>${realRisks
                 .map(
                     (r, i) =>
                         `<li class="audit-source-item" data-source-key="risk_${i}" tabindex="0" role="button">${escapeHtml(r)}</li>`,
@@ -1586,12 +1673,13 @@ function renderAuditLists(risks, strengths, sources) {
 }
 
 function auditRecommendationHeadline(label) {
-    const headlines = {
-        BUY: "RECOMMENDATION: BUY (Highly Cost-Effective)",
-        REVIEW: "RECOMMENDATION: PROCEED WITH CAUTION (Review Restrictions)",
-        PASS: "RECOMMENDATION: PASS (High Out-of-Pocket Risks)",
+    const riskByLabel = {
+        BUY: "Low Out-of-Pocket Risks",
+        REVIEW: "Moderate Out-of-Pocket Risks",
+        PASS: "High Out-of-Pocket Risks",
     };
-    return headlines[label] || headlines.REVIEW;
+    const risk = riskByLabel[label] || riskByLabel.REVIEW;
+    return `RECOMMENDATION: ${label} (${risk})`;
 }
 
 function renderAuditRecommendationBanner(data) {
@@ -1604,16 +1692,23 @@ function renderAuditRecommendationBanner(data) {
     const labelRaw = (data.verdict_label || "REVIEW").toUpperCase();
     const labelClass = labelRaw.toLowerCase();
     const headline = data.recommendation_headline || auditRecommendationHeadline(labelRaw);
-    const verdictLine = data.verdict
-        || (data.recommendation_summary ? data.recommendation_summary.split(".")[0].trim() : "")
+    const verdictLine = data.recommendation_summary
+        || data.verdict
         || "No verdict available for this policy.";
-    const whatsMissing = (data.whats_missing || "").trim();
+    const whatsMissingRaw = (data.whats_missing || "").trim();
+    const gapLines = whatsMissingRaw
+        ? whatsMissingRaw.split("\n").map((line) => line.replace(/^\-\s*/, "").trim())
+        : [];
+    const realGaps = filterAuditGapItems(gapLines.length ? gapLines : (data.key_risks || []));
+    const whatsMissing = realGaps.length
+        ? realGaps.map((gap) => `- ${gap}`).join("\n")
+        : "";
 
     headlineEl.textContent = headline;
     verdictEl.textContent = verdictLine.endsWith(".") ? verdictLine.slice(0, -1) : verdictLine;
-    missingEl.textContent = whatsMissing;
+    missingEl.textContent = whatsMissing || (labelRaw === "BUY" ? "No critical gaps identified for your location." : "");
 
-    banner.className = `audit-recommendation-banner ${labelClass}${whatsMissing ? "" : " no-missing"}`;
+    banner.className = `audit-recommendation-banner ${labelClass}${realGaps.length ? "" : " no-missing"}`;
     banner.hidden = false;
 }
 
@@ -1639,7 +1734,10 @@ function renderAuditResults(data) {
         badgeEl.hidden = false;
     }
     if (verdictText) {
-        const summary = data.recommendation_summary || data.verdict || "No verdict text available for this policy.";
+        const summary = data.strategic_verdict
+            || data.recommendation_summary
+            || data.verdict
+            || "No verdict text available for this policy.";
         verdictText.textContent = summary;
     }
     renderAuditRecommendationBanner(data);
@@ -1675,7 +1773,7 @@ async function uploadAuditPolicy(file) {
 
     auditUploadInProgress = true;
     setAuditDropzoneBusy(true);
-    setAuditUploadStatus("Extracting metrics from policy…");
+    setAuditUploadStatus("Reading pincode and extracting policy metrics…");
 
     const formData = new FormData();
     formData.append("file", file);
@@ -1765,12 +1863,13 @@ async function loadAuditPolicies() {
             return;
         }
         list.innerHTML = policies.map((p) => {
-            const label = p.verdict_label || "—";
+            const label = (p.verdict_label || "—").toUpperCase();
+            const labelClass = label === "—" ? "" : label.toLowerCase();
             const active = !auditCompareMode && p.policy_id === currentAuditPolicyId ? " active" : "";
             const checked = auditCompareSelected.has(p.policy_id) ? " checked" : "";
             return `<div class="audit-history-row">
                 <input type="checkbox" class="audit-compare-checkbox" data-policy-id="${p.policy_id}"${checked} aria-label="Select ${escapeHtml(p.filename)} for comparison">
-                <button type="button" class="audit-history-item${active}" data-policy-id="${p.policy_id}">${escapeHtml(p.filename)} <span class="muted-text">· ${escapeHtml(label)}</span></button>
+                <button type="button" class="audit-history-item${active}" data-policy-id="${p.policy_id}">${escapeHtml(p.filename)} <span class="audit-history-verdict ${labelClass}">${escapeHtml(label)}</span></button>
                 <button type="button" class="audit-history-delete" data-policy-id="${p.policy_id}" title="Remove audit" aria-label="Remove ${escapeHtml(p.filename)}">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
                 </button>

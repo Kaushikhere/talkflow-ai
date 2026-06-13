@@ -1,4 +1,5 @@
 import os
+from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import HTTPException
@@ -31,3 +32,11 @@ def get_groq_client():
 
     _client = Groq(api_key=api_key)
     return _client
+
+
+def groq_assistant_text(message: Any) -> str:
+    """Return assistant visible text; gpt-oss models may use reasoning when content is empty."""
+    content = (getattr(message, "content", None) or "").strip()
+    if content:
+        return content
+    return (getattr(message, "reasoning", None) or "").strip()

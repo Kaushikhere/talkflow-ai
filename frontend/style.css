@@ -1370,6 +1370,61 @@ html.mode-chat #audit-history-section {
     max-width: 560px;
 }
 
+.audit-profile-form {
+    margin-top: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+    border-radius: 10px;
+    background: var(--surface-elevated, rgba(255, 255, 255, 0.02));
+}
+
+.audit-profile-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+@media (max-width: 640px) {
+    .audit-profile-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.audit-profile-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.audit-profile-field span {
+    font-weight: 500;
+}
+
+.audit-profile-field select,
+.audit-profile-field input {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+    background: var(--surface, transparent);
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.audit-profile-field input[readonly] {
+    opacity: 0.85;
+    cursor: default;
+}
+
+.audit-profile-hint {
+    font-size: 12px;
+    margin: 0;
+    line-height: 1.45;
+}
+
 .audit-dropzone {
     margin-top: 20px;
     min-height: 160px;
@@ -1577,6 +1632,10 @@ html.mode-chat #audit-history-section {
 
 .audit-metric-badge.bad {
     border-top: 3px solid var(--danger);
+}
+
+.audit-metric-badge.neutral {
+    border-top: 3px solid var(--accent-cyan-soft, #67e8f9);
 }
 
 .metric-source-link {
@@ -1836,6 +1895,25 @@ html.mode-chat #audit-history-section {
 .audit-history-item.active {
     background: var(--surface-hover);
     color: var(--text);
+}
+
+.audit-history-verdict {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-left: 6px;
+}
+
+.audit-history-verdict.buy {
+    color: var(--success);
+}
+
+.audit-history-verdict.review {
+    color: #fbbf24;
+}
+
+.audit-history-verdict.pass {
+    color: var(--danger);
 }
 
 .audit-history-head {

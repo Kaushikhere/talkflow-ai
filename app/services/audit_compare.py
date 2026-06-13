@@ -8,7 +8,7 @@ from typing import Any
 
 from app.config import AUDIT_ANALYSIS_MODEL, AUDIT_MAX_TOKENS_COMPARE
 from app.services.audit_pipeline import _parse_json_response, policy_to_response
-from app.services.groq_client import get_groq_client
+from app.services.groq_client import get_groq_client, groq_assistant_text
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +24,7 @@ _COMPARE_SYSTEM_PROMPT = (
 
 def _groq_assistant_text(message: Any) -> str:
     """Return visible content; gpt-oss models may leave content empty and use reasoning."""
-    content = (getattr(message, "content", None) or "").strip()
-    if content:
-        return content
-    return (getattr(message, "reasoning", None) or "").strip()
+    return groq_assistant_text(message)
 
 
 def _normalize_compare_data(data: dict[str, Any]) -> dict[str, Any]:

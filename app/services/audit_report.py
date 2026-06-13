@@ -39,7 +39,9 @@ def build_markdown_report(policy: dict) -> str:
     label = (data.get("verdict_label") or "REVIEW").upper()
     headline = data.get("recommendation_headline") or _recommendation_headline(label)
     summary = data.get("recommendation_summary") or ""
+    strategic = data.get("strategic_verdict") or ""
     whats_missing = data.get("whats_missing") or ""
+    profile = data.get("user_profile") or {}
 
     lines.extend([
         "## Auditor's Recommendation",
@@ -47,8 +49,31 @@ def build_markdown_report(policy: dict) -> str:
         f"**{headline}**",
         "",
     ])
+    if profile:
+        city = profile.get("policy_city") or profile.get("user_city") or "—"
+        pin = profile.get("policy_pincode")
+        room = profile.get("local_room_cost")
+        si = profile.get("user_sum_insured")
+        room_txt = f"₹{int(room):,}/day" if room is not None else "—"
+        si_txt = f"₹{int(si):,}" if si is not None else "—"
+        zone = profile.get("policy_zone") or "—"
+        district = profile.get("policy_district")
+        pin_part = f"Pincode {pin}" + (f" ({district})" if pin and district else "") if pin else ""
+        context = " · ".join(
+            part for part in (
+                pin_part,
+                f"{city} ({profile.get('city_tier', '—')})",
+                f"Zone {zone}",
+                f"Room benchmark {room_txt}",
+                f"Sum insured {si_txt}",
+            ) if part
+        )
+        lines.extend([
+            f"**Policy context:** {context}",
+            "",
+        ])
     if summary:
-        lines.extend([summary, ""])
+        lines.extend(["**The Verdict:**", "", summary, ""])
     if whats_missing:
         lines.extend([
             "**Critical gaps:**",
@@ -60,7 +85,7 @@ def build_markdown_report(policy: dict) -> str:
     lines.extend([
         "## Strategic Verdict",
         "",
-        data.get("verdict") or "No verdict available.",
+        strategic or data.get("verdict") or "No verdict available.",
         "",
     ])
 
@@ -117,12 +142,21 @@ def build_pdf_report(policy: dict) -> bytes:
     label = (data.get("verdict_label") or "REVIEW").upper()
     headline = data.get("recommendation_headline") or _recommendation_headline(label)
     summary = data.get("recommendation_summary") or ""
+    strategic = data.get("strategic_verdict") or ""
     whats_missing = data.get("whats_missing") or ""
+    profile = data.get("user_profile") or {}
 
     write_line("Auditor's Recommendation", size=13, gap=6)
     for chunk_start in range(0, len(headline), 90):
         write_line(headline[chunk_start : chunk_start + 90])
+    if profile:
+        city = profile.get("policy_city") or profile.get("user_city") or "—"
+        pin = profile.get("policy_pincode")
+        pin_txt = f" pincode {pin}" if pin else ""
+        profile_line = f"Policy context:{pin_txt} {city} ({profile.get('city_tier', '—')})"
+        write_line(profile_line, gap=2)
     if summary:
+        write_line("The Verdict:", size=12, gap=4)
         for chunk_start in range(0, len(summary), 90):
             write_line(summary[chunk_start : chunk_start + 90], gap=2)
     if whats_missing:
@@ -131,7 +165,7 @@ def build_pdf_report(policy: dict) -> bytes:
             write_line(whats_missing[chunk_start : chunk_start + 90], gap=2)
 
     write_line("Strategic Verdict", size=13, gap=6)
-    verdict = data.get("verdict") or ""
+    verdict = strategic or data.get("verdict") or ""
     for chunk_start in range(0, len(verdict), 90):
         write_line(verdict[chunk_start : chunk_start + 90])
 

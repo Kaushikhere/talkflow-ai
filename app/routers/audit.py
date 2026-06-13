@@ -9,6 +9,7 @@ from app.config import AUDIT_UPLOADS_DIR, MAX_UPLOAD_BYTES
 from app.database import delete_uploaded_policy, get_uploaded_policy, list_uploaded_policies
 from app.models import AuditChatRequest
 from app.services.audit_chat import generate_audit_chat_reply, stream_audit_chat_events
+from app.services.audit_market_data import resolve_evaluation_profile
 from app.services.audit_pipeline import get_policy_source, policy_to_response, run_audit_pipeline
 from app.services.audit_report import build_markdown_report, build_pdf_report, report_attachment_name
 
@@ -31,9 +32,32 @@ def _resolve_audit_pdf_path(stored_path: str) -> Path:
     return path
 
 
+@router.get("/pincode/{pincode}")
+def audit_pincode_lookup(pincode: str):
+    """Resolve an Indian pincode to district/city (India Post reference data)."""
+    from app.services.audit_pincode import lookup_india_pincode
+
+    result = lookup_india_pincode(pincode)
+    if not result.get("valid"):
+        raise HTTPException(status_code=404, detail="Invalid or unknown Indian pincode.")
+    return result
+
+
+@router.get("/market-benchmarks")
+def audit_market_benchmarks():
+    """Geo benchmarks are resolved per policy by the analysis model (not a fixed city list)."""
+    return {
+        "mode": "llm",
+        "description": (
+            "City tier, local hospital room costs, and minimum sum insured are determined per upload "
+            "from the policy pincode, India Post facts, and policy text via the geographic analysis model."
+        ),
+    }
+
+
 @router.post("/upload")
 async def audit_upload(file: UploadFile = File(...)):
-    """Upload a third-party policy PDF and run the evaluator pipeline."""
+    """Upload a policy PDF; city/zone are read from the document for benchmarking."""
     safe_name = Path(file.filename or "policy.pdf").name
     if Path(safe_name).suffix.lower() != ".pdf":
         raise HTTPException(status_code=400, detail="Only PDF files are supported for audit.")
